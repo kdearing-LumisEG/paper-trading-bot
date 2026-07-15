@@ -10,6 +10,7 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from trading_bot.config import Settings, load_settings
+from trading_bot.data.coverage import audit_session_coverage
 from trading_bot.data.storage import load_bars, save_bars
 from trading_bot.data.validation import (
     filter_regular_session_bars,
@@ -51,9 +52,7 @@ def _completed_data_window(
         tzinfo=timezone.utc,
     )
 
-    start = end - timedelta(
-        days=lookback_calendar_days
-    )
+    start = end - timedelta(days=lookback_calendar_days)
 
     return start, end
 
@@ -61,7 +60,7 @@ def _completed_data_window(
 def fetch_recent_bars(
     settings: Settings,
     lookback_calendar_days: int = 14,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, datetime, datetime]:
     """Retrieve historical bars without submitting orders."""
 
     start, end = _completed_data_window(
@@ -82,9 +81,7 @@ def fetch_recent_bars(
         start=start,
         end=end,
         adjustment=Adjustment.RAW,
-        feed=_resolve_data_feed(
-            settings.data_feed
-        ),
+        feed=_resolve_data_feed(settings.data_feed),
     )
 
     response = client.get_stock_bars(request)
@@ -92,19 +89,18 @@ def fetch_recent_bars(
 
     if frame.empty:
         raise ValueError(
-            f"Alpaca returned no bars for "
-            f"{settings.symbol}."
+            f"Alpaca returned no bars for {settings.symbol}."
         )
 
-    return frame
+    return frame, start, end
 
 
 def main() -> None:
-    """Download, validate, save, and reload market bars."""
+    """Download, validate, audit, save, and reload market bars."""
 
     settings = load_settings()
 
-    raw_bars = fetch_recent_bars(settings)
+    raw_bars, start, end = fetch_recent_bars(settings)
 
     validated_bars = validate_bars(
         raw_bars,
@@ -121,24 +117,80 @@ def main() -> None:
             "No regular-session bars remain after filtering."
         )
 
-    output_path = Path(
-        "data/processed"
-    ) / (
+    audit = audit_session_coverage(
+        frame=session_bars,
+        timeframe_minutes=settings.timeframe_minutes,
+        start=start,
+        end=end,
+    )
+
+    coverage_columns = [
+        "session_date",
+        "expected_bars",
+        "actual_bars",
+        "missing_bars",
+        "unexpected_bars",
+        "complete",
+    ]
+
+    print()
+    print("Session coverage report:")
+    print(
+        audit.sessions[coverage_columns].to_string(
+            index=False
+        )
+    )
+
+    if not audit.is_complete:
+        print()
+        print("Coverage audit failed.")
+
+        if not audit.missing_timestamps.empty:
+            print("First missing timestamps:")
+            for timestamp in audit.missing_timestamps[:10]:
+                print(f"  {timestamp}")
+
+        if not audit.unexpected_timestamps.empty:
+            print("First unexpected timestamps:")
+            for timestamp in audit.unexpected_timestamps[:10]:
+                print(f"  {timestamp}")
+
+        raise ValueError(
+            "Historical bars did not pass the "
+            "exchange-session coverage audit."
+        )
+
+    output_directory = Path("data/processed")
+
+    bars_path = output_directory / (
         f"{settings.symbol}_"
         f"{settings.timeframe_minutes}min.parquet"
     )
 
-    save_bars(
-        session_bars,
-        output_path,
+    coverage_path = output_directory / (
+        f"{settings.symbol}_"
+        f"{settings.timeframe_minutes}min_coverage.csv"
+    )
+
+    save_bars(session_bars, bars_path)
+
+    output_directory.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    audit.sessions.to_csv(
+        coverage_path,
+        index=False,
     )
 
     reloaded_bars = validate_bars(
-        load_bars(output_path),
+        load_bars(bars_path),
         expected_symbol=settings.symbol,
         timeframe_minutes=settings.timeframe_minutes,
     )
 
+    print()
     print("Historical-data pipeline succeeded.")
     print(f"Symbol: {settings.symbol}")
     print(f"Feed: {settings.data_feed}")
@@ -148,10 +200,18 @@ def main() -> None:
     )
     print(f"Raw rows received: {len(raw_bars)}")
     print(
-        f"Regular-session rows saved: "
+        f"Validated session rows: "
         f"{len(reloaded_bars)}"
     )
-    print(f"File: {output_path.resolve()}")
+    print(
+        f"Complete trading sessions: "
+        f"{len(audit.sessions)}"
+    )
+    print(f"Bars file: {bars_path.resolve()}")
+    print(
+        f"Coverage report: "
+        f"{coverage_path.resolve()}"
+    )
     print(
         f"First timestamp: "
         f"{reloaded_bars['timestamp'].min()}"
