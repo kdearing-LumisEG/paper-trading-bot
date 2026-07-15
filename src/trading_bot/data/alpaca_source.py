@@ -1,6 +1,7 @@
 """Read-only adapter for retrieving historical stock bars from Alpaca."""
 
 from datetime import datetime, time, timedelta, timezone
+from pathlib import Path
 
 import pandas as pd
 from alpaca.data.enums import Adjustment, DataFeed
@@ -9,6 +10,11 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from trading_bot.config import Settings, load_settings
+from trading_bot.data.storage import load_bars, save_bars
+from trading_bot.data.validation import (
+    filter_regular_session_bars,
+    validate_bars,
+)
 
 
 def _resolve_data_feed(feed_name: str) -> DataFeed:
@@ -22,7 +28,9 @@ def _resolve_data_feed(feed_name: str) -> DataFeed:
     try:
         return feeds[feed_name]
     except KeyError as exc:
-        raise ValueError(f"Unsupported Alpaca data feed: {feed_name}") from exc
+        raise ValueError(
+            f"Unsupported Alpaca data feed: {feed_name}"
+        ) from exc
 
 
 def _completed_data_window(
@@ -31,15 +39,21 @@ def _completed_data_window(
     """Create a UTC window that excludes the current calendar day."""
 
     if lookback_calendar_days <= 0:
-        raise ValueError("lookback_calendar_days must be positive.")
+        raise ValueError(
+            "lookback_calendar_days must be positive."
+        )
 
     today_utc = datetime.now(timezone.utc).date()
+
     end = datetime.combine(
         today_utc,
         time.min,
         tzinfo=timezone.utc,
     )
-    start = end - timedelta(days=lookback_calendar_days)
+
+    start = end - timedelta(
+        days=lookback_calendar_days
+    )
 
     return start, end
 
@@ -48,9 +62,11 @@ def fetch_recent_bars(
     settings: Settings,
     lookback_calendar_days: int = 14,
 ) -> pd.DataFrame:
-    """Retrieve recent historical bars without submitting any orders."""
+    """Retrieve historical bars without submitting orders."""
 
-    start, end = _completed_data_window(lookback_calendar_days)
+    start, end = _completed_data_window(
+        lookback_calendar_days
+    )
 
     client = StockHistoricalDataClient(
         api_key=settings.alpaca_api_key,
@@ -66,7 +82,9 @@ def fetch_recent_bars(
         start=start,
         end=end,
         adjustment=Adjustment.RAW,
-        feed=_resolve_data_feed(settings.data_feed),
+        feed=_resolve_data_feed(
+            settings.data_feed
+        ),
     )
 
     response = client.get_stock_bars(request)
@@ -74,45 +92,74 @@ def fetch_recent_bars(
 
     if frame.empty:
         raise ValueError(
-            f"Alpaca returned no bars for {settings.symbol} "
-            f"between {start.isoformat()} and {end.isoformat()}."
+            f"Alpaca returned no bars for "
+            f"{settings.symbol}."
         )
-
-    required_columns = {
-        "symbol",
-        "timestamp",
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-    }
-
-    missing_columns = required_columns.difference(frame.columns)
-
-    if missing_columns:
-        missing = ", ".join(sorted(missing_columns))
-        raise ValueError(f"Alpaca response is missing columns: {missing}")
 
     return frame
 
 
 def main() -> None:
-    """Run a safe market-data connectivity check."""
+    """Download, validate, save, and reload market bars."""
 
     settings = load_settings()
-    bars = fetch_recent_bars(settings)
 
-    print("Read-only Alpaca market-data request succeeded.")
+    raw_bars = fetch_recent_bars(settings)
+
+    validated_bars = validate_bars(
+        raw_bars,
+        expected_symbol=settings.symbol,
+        timeframe_minutes=settings.timeframe_minutes,
+    )
+
+    session_bars = filter_regular_session_bars(
+        validated_bars
+    )
+
+    if session_bars.empty:
+        raise ValueError(
+            "No regular-session bars remain after filtering."
+        )
+
+    output_path = Path(
+        "data/processed"
+    ) / (
+        f"{settings.symbol}_"
+        f"{settings.timeframe_minutes}min.parquet"
+    )
+
+    save_bars(
+        session_bars,
+        output_path,
+    )
+
+    reloaded_bars = validate_bars(
+        load_bars(output_path),
+        expected_symbol=settings.symbol,
+        timeframe_minutes=settings.timeframe_minutes,
+    )
+
+    print("Historical-data pipeline succeeded.")
     print(f"Symbol: {settings.symbol}")
     print(f"Feed: {settings.data_feed}")
-    print(f"Timeframe: {settings.timeframe_minutes} minutes")
-    print(f"Rows received: {len(bars)}")
-    print(f"First timestamp: {bars['timestamp'].min()}")
-    print(f"Last timestamp: {bars['timestamp'].max()}")
-    print()
-    print("First three bars:")
-    print(bars.head(3).to_string(index=False))
+    print(
+        f"Timeframe: "
+        f"{settings.timeframe_minutes} minutes"
+    )
+    print(f"Raw rows received: {len(raw_bars)}")
+    print(
+        f"Regular-session rows saved: "
+        f"{len(reloaded_bars)}"
+    )
+    print(f"File: {output_path.resolve()}")
+    print(
+        f"First timestamp: "
+        f"{reloaded_bars['timestamp'].min()}"
+    )
+    print(
+        f"Last timestamp: "
+        f"{reloaded_bars['timestamp'].max()}"
+    )
 
 
 if __name__ == "__main__":
