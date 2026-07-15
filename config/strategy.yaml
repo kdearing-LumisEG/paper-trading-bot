@@ -1,0 +1,7 @@
+symbol: SPY
+timeframe_minutes: 15
+data_feed: iex
+
+strategy:
+  fast_ema: 9
+  slow_ema: 21

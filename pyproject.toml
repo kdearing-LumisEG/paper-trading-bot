@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paper-trading-bot"
+version = "0.1.0"
+description = "An educational, deterministic paper-trading bot."
+requires-python = ">=3.12"
+dependencies = [
+    "alpaca-py",
+    "pandas",
+    "pyarrow",
+    "python-dotenv",
+    "PyYAML"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

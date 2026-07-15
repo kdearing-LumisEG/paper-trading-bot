@@ -1,0 +1,27 @@
+.venv/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Python-generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# VS Code local settings
+.vscode/
+
+# Generated project data
+data/raw/
+data/processed/
+logs/
+*.parquet
+
+# Python packaging artifacts
+*.egg-info/
+build/
+dist/
