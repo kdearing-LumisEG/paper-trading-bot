@@ -82,6 +82,7 @@ def test_runner_exports_separate_period_reports(
         "trade_log",
         "equity_curve",
         "performance_summary",
+        "skipped_entries",
     }
 
     assert set(
@@ -90,12 +91,19 @@ def test_runner_exports_separate_period_reports(
         "trade_log",
         "equity_curve",
         "performance_summary",
+        "skipped_entries",
     }
 
-    for path in (
-        list(result.development_paths.values())
-        + list(result.evaluation_paths.values())
-    ):
+    all_report_paths = (
+        list(
+            result.development_paths.values()
+        )
+        + list(
+            result.evaluation_paths.values()
+        )
+    )
+
+    for path in all_report_paths:
         assert path.exists()
 
 

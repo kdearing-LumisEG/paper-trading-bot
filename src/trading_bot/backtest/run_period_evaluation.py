@@ -115,6 +115,7 @@ def _expected_output_paths(
         "trade_log.csv",
         "equity_curve.csv",
         "performance_summary.json",
+        "skipped_entries.csv",
     ]
 
     paths = [
@@ -198,6 +199,11 @@ def run_frozen_period_evaluation(
         experiment_name=DEVELOPMENT_PERIOD.name,
         root=output_root,
         overwrite=overwrite,
+        skipped_entries=(
+            development
+            .backtest_result
+            .skipped_entries_to_frame()
+        ),
     )
 
     evaluation_paths = export_backtest_report(
@@ -219,6 +225,11 @@ def run_frozen_period_evaluation(
         ),
         root=output_root,
         overwrite=overwrite,
+        skipped_entries=(
+            unseen_evaluation
+            .backtest_result
+            .skipped_entries_to_frame()
+        ),
     )
 
     comparison_path = (

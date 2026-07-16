@@ -7,6 +7,19 @@ from pathlib import Path
 
 import pandas as pd
 
+SKIPPED_ENTRY_COLUMNS = [
+    "symbol",
+    "signal_time",
+    "execution_time",
+    "reference_price",
+    "adjusted_fill_price",
+    "requested_quantity",
+    "required_cash",
+    "available_cash",
+    "max_cash_fraction",
+    "reason",
+]
+
 
 def _ensure_directory(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -81,17 +94,73 @@ def export_backtest_report(
     experiment_name: str,
     root: Path | None = None,
     overwrite: bool = False,
+    skipped_entries: pd.DataFrame | None = None,
 ) -> dict[str, Path]:
-    if not experiment_name or not experiment_name.strip():
-        raise ValueError("experiment_name must be a non-empty string.")
+    """Export the complete report bundle for one backtest."""
 
-    root_path = _base_export_root(root) / experiment_name
-    trade_log_path = root_path / "trade_log.csv"
-    equity_curve_path = root_path / "equity_curve.csv"
-    summary_path = root_path / "performance_summary.json"
+    if not experiment_name or not experiment_name.strip():
+        raise ValueError(
+            "experiment_name must be a non-empty string."
+        )
+
+    root_path = (
+        _base_export_root(root)
+        / experiment_name
+    )
+
+    trade_log_path = (
+        root_path / "trade_log.csv"
+    )
+
+    equity_curve_path = (
+        root_path / "equity_curve.csv"
+    )
+
+    summary_path = (
+        root_path / "performance_summary.json"
+    )
+
+    skipped_entries_path = (
+        root_path / "skipped_entries.csv"
+    )
+
+    if skipped_entries is None:
+        skipped_entries_frame = pd.DataFrame(
+            columns=SKIPPED_ENTRY_COLUMNS
+        )
+    else:
+        skipped_entries_frame = (
+            skipped_entries.copy(deep=True)
+        )
+
+        if skipped_entries_frame.empty:
+            skipped_entries_frame = pd.DataFrame(
+                columns=SKIPPED_ENTRY_COLUMNS
+            )
 
     return {
-        "trade_log": export_trade_log_csv(trades, trade_log_path, overwrite=overwrite),
-        "equity_curve": export_equity_curve_csv(equity_curve, equity_curve_path, overwrite=overwrite),
-        "performance_summary": export_performance_summary_json(summary, summary_path, overwrite=overwrite),
+        "trade_log": export_trade_log_csv(
+            trades,
+            trade_log_path,
+            overwrite=overwrite,
+        ),
+        "equity_curve": export_equity_curve_csv(
+            equity_curve,
+            equity_curve_path,
+            overwrite=overwrite,
+        ),
+        "performance_summary": (
+            export_performance_summary_json(
+                summary,
+                summary_path,
+                overwrite=overwrite,
+            )
+        ),
+        "skipped_entries": (
+            export_skipped_entries_csv(
+                skipped_entries_frame,
+                skipped_entries_path,
+                overwrite=overwrite,
+            )
+        ),
     }
