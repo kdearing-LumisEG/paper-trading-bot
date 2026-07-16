@@ -261,3 +261,95 @@ def test_empty_merged_data_fails() -> None:
             start_date=date(2024, 1, 2),
             end_date=date(2024, 1, 3),
         )
+def test_incomplete_session_can_be_explicitly_excluded() -> None:
+    incomplete = (
+        complete_two_day_frame()
+        .drop(index=5)
+        .reset_index(drop=True)
+    )
+
+    result = audit_merged_range(
+        merged_bars=make_merged(
+            incomplete
+        ),
+        expected_symbol="SPY",
+        timeframe_minutes=15,
+        start_date=date(2024, 1, 2),
+        end_date=date(2024, 1, 3),
+        exclude_incomplete_sessions=True,
+    )
+
+    assert result.requested_session_count == 2
+    assert result.session_count == 1
+
+    assert result.excluded_session_dates == (
+        date(2024, 1, 2),
+    )
+
+    assert result.actual_bar_count == 26
+    assert result.expected_bar_count == 26
+    assert result.requested_expected_bar_count == 52
+
+    assert result.missing_bar_count == 1
+    assert result.excluded_missing_bar_count == 1
+    assert result.unexpected_bar_count == 0
+
+    remaining_dates = (
+        pd.to_datetime(
+            result.frame["timestamp"],
+            utc=True,
+        )
+        .dt.tz_convert("America/New_York")
+        .dt.date
+    )
+
+    assert set(remaining_dates) == {
+        date(2024, 1, 3)
+    }
+
+    coverage_dates = pd.to_datetime(
+        result.coverage.sessions[
+            "session_date"
+        ]
+    ).dt.date
+
+    excluded_row = (
+        result.coverage.sessions.loc[
+            coverage_dates
+            == date(2024, 1, 2)
+        ]
+        .iloc[0]
+    )
+
+    assert not bool(
+        excluded_row[
+            "included_in_dataset"
+        ]
+    )
+
+    assert excluded_row[
+        "exclusion_reason"
+    ] == "incomplete_source_session"
+
+
+def test_exclusion_fails_when_every_session_is_incomplete() -> None:
+    incomplete = (
+        complete_two_day_frame()
+        .drop(index=[5, 31])
+        .reset_index(drop=True)
+    )
+
+    with pytest.raises(
+        RangeCoverageError,
+        match="All requested sessions are incomplete",
+    ):
+        audit_merged_range(
+            merged_bars=make_merged(
+                incomplete
+            ),
+            expected_symbol="SPY",
+            timeframe_minutes=15,
+            start_date=date(2024, 1, 2),
+            end_date=date(2024, 1, 3),
+            exclude_incomplete_sessions=True,
+        )
