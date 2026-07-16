@@ -15,3 +15,15 @@ Market data, validation, strategy logic, risk management, execution, and reporti
 ## D004: Protect credentials
 
 API credentials will be stored in a local `.env` file that is excluded from Git.
+
+## D005: Equity marked to market
+
+Equity is calculated using the current bar closing price, so an open position is marked to market at each bar close.
+
+## D006: Gross performance reporting
+
+Performance metrics are gross of fees and slippage.
+
+## D007: Baseline is reference only
+
+The buy-and-hold baseline is a reference calculation that may hold overnight and is not an apples-to-apples comparison with the intraday strategy.

@@ -118,7 +118,9 @@ def run_backtest(
         symbol = str(unique_symbols[0]) if len(unique_symbols) else None
 
     trades: list[Trade] = []
+    equity_rows: list[dict[str, object]] = []
     position_open = False
+    position_quantity = 0
     entry_price = 0.0
     entry_time: pd.Timestamp | None = None
     entry_signal_time: pd.Timestamp | None = None
@@ -129,16 +131,99 @@ def run_backtest(
         row = bars.iloc[index]
         current_time = row["timestamp"]
         current_session = _session_date(row["timestamp"])
+        next_session = (
+            _session_date(bars.iloc[index + 1]["timestamp"])
+            if index + 1 < len(bars)
+            else current_session
+        )
+        last_bar_of_session = (
+            index == len(bars) - 1
+            or next_session != current_session
+        )
 
-        if index == 0:
-            continue
+        if index > 0:
+            previous_row = bars.iloc[index - 1]
+            previous_session = _session_date(previous_row["timestamp"])
 
-        previous_row = bars.iloc[index - 1]
-        previous_session = _session_date(previous_row["timestamp"])
+            if position_open and previous_session != current_session:
+                exit_price = previous_row["close"]
+                exit_time = previous_row["timestamp"]
+                trades.append(
+                    _build_trade(
+                        symbol,
+                        entry_signal_time=entry_signal_time,
+                        entry_time=entry_time,
+                        entry_price=entry_price,
+                        exit_signal_time=None,
+                        exit_time=exit_time,
+                        exit_price=exit_price,
+                        quantity=position_quantity,
+                        exit_reason="session_close",
+                        bars_held=index - entry_index,
+                    )
+                )
+                current_cash += exit_price * position_quantity
+                position_open = False
+                position_quantity = 0
+                entry_price = 0.0
+                entry_time = None
+                entry_signal_time = None
+                entry_index = None
 
-        if position_open and previous_session != current_session:
-            exit_price = previous_row["close"]
-            exit_time = previous_row["timestamp"]
+            if previous_row["signal"] == "enter_long":
+                if not position_open and previous_session == current_session:
+                    position_open = True
+                    position_quantity = 1
+                    entry_price = row["open"]
+                    entry_time = current_time
+                    entry_signal_time = previous_row["timestamp"]
+                    entry_index = index
+                    current_cash -= entry_price * position_quantity
+
+            if previous_row["signal"] == "exit_long":
+                if position_open and previous_session == current_session:
+                    exit_price = row["open"]
+                    exit_time = current_time
+                    trades.append(
+                        _build_trade(
+                            symbol,
+                            entry_signal_time=entry_signal_time,
+                            entry_time=entry_time,
+                            entry_price=entry_price,
+                            exit_signal_time=previous_row["timestamp"],
+                            exit_time=exit_time,
+                            exit_price=exit_price,
+                            quantity=position_quantity,
+                            exit_reason="signal",
+                            bars_held=index - entry_index,
+                        )
+                    )
+                    current_cash += exit_price * position_quantity
+                    position_open = False
+                    position_quantity = 0
+                    entry_price = 0.0
+                    entry_time = None
+                    entry_signal_time = None
+                    entry_index = None
+
+        position_market_value = position_quantity * row["close"]
+        equity = current_cash + position_market_value
+        equity_rows.append(
+            {
+                "timestamp": current_time,
+                "open": row["open"],
+                "close": row["close"],
+                "cash": current_cash,
+                "position_quantity": position_quantity,
+                "position_market_value": position_market_value,
+                "equity": equity,
+                "is_exposed": position_quantity != 0,
+            }
+        )
+
+        if position_open and last_bar_of_session:
+            exit_price = row["close"]
+            exit_time = row["timestamp"]
             trades.append(
                 _build_trade(
                     symbol,
@@ -148,72 +233,27 @@ def run_backtest(
                     exit_signal_time=None,
                     exit_time=exit_time,
                     exit_price=exit_price,
-                    quantity=1,
+                    quantity=position_quantity,
                     exit_reason="session_close",
-                    bars_held=index - entry_index,
+                    bars_held=index - entry_index + 1,
                 )
             )
-            current_cash += exit_price
+            current_cash += exit_price * position_quantity
             position_open = False
+            position_quantity = 0
             entry_price = 0.0
             entry_time = None
             entry_signal_time = None
             entry_index = None
 
-        if previous_row["signal"] == "enter_long":
-            if not position_open and previous_session == current_session:
-                position_open = True
-                entry_price = row["open"]
-                entry_time = current_time
-                entry_signal_time = previous_row["timestamp"]
-                entry_index = index
-
-        if previous_row["signal"] == "exit_long":
-            if position_open and previous_session == current_session:
-                exit_price = row["open"]
-                exit_time = current_time
-                trades.append(
-                    _build_trade(
-                        symbol,
-                        entry_signal_time=entry_signal_time,
-                        entry_time=entry_time,
-                        entry_price=entry_price,
-                        exit_signal_time=previous_row["timestamp"],
-                        exit_time=exit_time,
-                        exit_price=exit_price,
-                        quantity=1,
-                        exit_reason="signal",
-                        bars_held=index - entry_index,
-                    )
-                )
-                current_cash += exit_price
-                position_open = False
-                entry_price = 0.0
-                entry_time = None
-                entry_signal_time = None
-                entry_index = None
-
-    if position_open:
-        last_row = bars.iloc[-1]
-        exit_price = last_row["close"]
-        exit_time = last_row["timestamp"]
-        trades.append(
-            _build_trade(
-                symbol,
-                entry_signal_time=entry_signal_time,
-                entry_time=entry_time,
-                entry_price=entry_price,
-                exit_signal_time=None,
-                exit_time=exit_time,
-                exit_price=exit_price,
-                quantity=1,
-                exit_reason="session_close",
-                bars_held=len(bars) - entry_index,
-            )
-        )
-        current_cash += exit_price
+    equity_curve = pd.DataFrame(equity_rows)
+    equity_curve["running_peak_equity"] = equity_curve["equity"].cummax()
+    equity_curve["drawdown"] = (
+        equity_curve["equity"] - equity_curve["running_peak_equity"]
+    ) / equity_curve["running_peak_equity"]
 
     return BacktestResult.from_trades(
         trades=trades,
         starting_cash=starting_cash,
+        equity_curve=equity_curve,
     )

@@ -1,6 +1,6 @@
 """Structured models for backtest trades and results."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Iterable
 
@@ -30,12 +30,14 @@ class BacktestResult:
     ending_cash: float
     gross_pnl: float
     number_of_trades: int
+    equity_curve: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     @classmethod
     def from_trades(
         cls,
         trades: Iterable[Trade],
         starting_cash: float,
+        equity_curve: pd.DataFrame | None = None,
     ) -> "BacktestResult":
         trades_list = list(trades)
         ending_cash = starting_cash + sum(t.gross_pnl for t in trades_list)
@@ -47,6 +49,7 @@ class BacktestResult:
             ending_cash=ending_cash,
             gross_pnl=gross_pnl,
             number_of_trades=len(trades_list),
+            equity_curve=equity_curve.copy(deep=True) if equity_curve is not None else pd.DataFrame(),
         )
 
     def to_frame(self) -> pd.DataFrame:
