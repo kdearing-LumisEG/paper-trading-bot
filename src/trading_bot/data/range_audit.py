@@ -1,6 +1,7 @@
 """Regular-session filtering and coverage auditing for date ranges."""
 
 from dataclasses import dataclass
+
 from datetime import date, datetime, time, timedelta, timezone
 
 import pandas as pd
@@ -8,10 +9,12 @@ import pandas as pd
 from trading_bot.data.coverage import (
     SessionCoverageAudit,
     audit_session_coverage,
+    filter_exchange_session_bars,
 )
+
 from trading_bot.data.range_merge import MergedBars
+
 from trading_bot.data.validation import (
-    filter_regular_session_bars,
     validate_bars,
 )
 
@@ -122,7 +125,7 @@ def audit_merged_range(
         )
 
     regular_session_bars = (
-        filter_regular_session_bars(
+        filter_exchange_session_bars(
             merged_bars.frame
         )
     )

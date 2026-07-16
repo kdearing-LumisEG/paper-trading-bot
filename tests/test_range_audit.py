@@ -163,18 +163,14 @@ def test_missing_regular_session_bar_fails() -> None:
         )
 
 
-def test_unexpected_holiday_bar_fails() -> None:
-    regular_bars = (
-        complete_two_day_frame()
-    )
+def test_holiday_bar_is_removed() -> None:
+    regular_bars = complete_two_day_frame()
 
     holiday_bar = pd.DataFrame(
         {
             "symbol": ["SPY"],
             "timestamp": pd.to_datetime(
-                [
-                    "2024-01-01T15:00:00Z"
-                ],
+                ["2024-01-01T15:00:00Z"],
                 utc=True,
             ),
             "open": [100.0],
@@ -193,23 +189,22 @@ def test_unexpected_holiday_bar_fails() -> None:
         ignore_index=True,
     ).sort_values(
         "timestamp"
-    ).reset_index(
-        drop=True
+    ).reset_index(drop=True)
+
+    result = audit_merged_range(
+        merged_bars=make_merged(
+            combined
+        ),
+        expected_symbol="SPY",
+        timeframe_minutes=15,
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 3),
     )
 
-    with pytest.raises(
-        RangeCoverageError,
-        match="1 unexpected bars",
-    ):
-        audit_merged_range(
-            merged_bars=make_merged(
-                combined
-            ),
-            expected_symbol="SPY",
-            timeframe_minutes=15,
-            start_date=date(2024, 1, 1),
-            end_date=date(2024, 1, 3),
-        )
+    assert result.merged_row_count == 53
+    assert result.actual_bar_count == 52
+    assert result.unexpected_bar_count == 0
+    assert result.coverage.is_complete
 
 
 def test_source_dataframe_is_not_modified() -> None:

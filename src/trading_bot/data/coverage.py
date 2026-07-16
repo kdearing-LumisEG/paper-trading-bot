@@ -128,3 +128,92 @@ def audit_session_coverage(
         missing_timestamps=all_expected.difference(timestamps),
         unexpected_timestamps=timestamps.difference(all_expected),
     )
+
+def filter_exchange_session_bars(
+    frame: pd.DataFrame,
+    calendar_name: str = "NYSE",
+) -> pd.DataFrame:
+    """Keep only bars inside each scheduled exchange session.
+
+    Unlike a fixed 9:30 a.m. through 4:00 p.m. filter, this respects
+    holidays and scheduled early closes.
+    """
+
+    if frame.empty:
+        return frame.copy(deep=True)
+
+    if "timestamp" not in frame.columns:
+        raise ValueError(
+            "Bar data must include a timestamp column."
+        )
+
+    result = frame.copy(deep=True)
+
+    timestamps = pd.to_datetime(
+        result["timestamp"],
+        utc=True,
+        errors="raise",
+    )
+
+    eastern_dates = (
+        timestamps
+        .dt.tz_convert("America/New_York")
+        .dt.date
+    )
+
+    calendar = mcal.get_calendar(
+        calendar_name
+    )
+
+    schedule = calendar.schedule(
+        start_date=min(eastern_dates),
+        end_date=max(eastern_dates),
+    )
+
+    session_windows: dict[
+        object,
+        tuple[pd.Timestamp, pd.Timestamp],
+    ] = {}
+
+    for session_date, session in schedule.iterrows():
+        session_windows[
+            session_date.date()
+        ] = (
+            pd.Timestamp(
+                session["market_open"]
+            ).tz_convert("UTC"),
+            pd.Timestamp(
+                session["market_close"]
+            ).tz_convert("UTC"),
+        )
+
+    keep_rows: list[bool] = []
+
+    for timestamp, session_date in zip(
+        timestamps,
+        eastern_dates,
+        strict=True,
+    ):
+        session_window = session_windows.get(
+            session_date
+        )
+
+        if session_window is None:
+            keep_rows.append(False)
+            continue
+
+        market_open, market_close = (
+            session_window
+        )
+
+        keep_rows.append(
+            market_open
+            <= timestamp
+            < market_close
+        )
+
+    result["timestamp"] = timestamps
+
+    return result.loc[
+        keep_rows
+    ].reset_index(drop=True)
