@@ -20,6 +20,7 @@ class PerformanceMetrics:
     total_return_pct: float
     maximum_drawdown_pct: float | None
     number_of_trades: int
+    number_of_skipped_entries: int
     winning_trades: int
     losing_trades: int
     win_rate_pct: float | None
@@ -239,6 +240,9 @@ class PerformanceMetrics:
                 maximum_drawdown_pct
             ),
             number_of_trades=number_of_trades,
+            number_of_skipped_entries=(
+                backtest_result.number_of_skipped_entries
+            ),
             winning_trades=winning_trades,
             losing_trades=losing_trades,
             win_rate_pct=win_rate_pct,
@@ -289,6 +293,9 @@ class PerformanceMetrics:
             ),
             "number_of_trades": (
                 self.number_of_trades
+            ),
+            "number_of_skipped_entries": (
+                self.number_of_skipped_entries
             ),
             "winning_trades": (
                 self.winning_trades

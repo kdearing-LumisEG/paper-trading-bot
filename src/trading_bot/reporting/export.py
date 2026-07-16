@@ -31,6 +31,23 @@ def export_trade_log_csv(
     trades.to_csv(path, index=False)
     return path
 
+def export_skipped_entries_csv(
+    skipped_entries: pd.DataFrame,
+    path: Path,
+    overwrite: bool = False,
+) -> Path:
+    """Export entry signals rejected by sizing or risk controls."""
+
+    _ensure_directory(path)
+    _validate_overwrite(path, overwrite)
+
+    skipped_entries.to_csv(
+        path,
+        index=False,
+    )
+
+    return path
+
 
 def export_equity_curve_csv(
     equity_curve: pd.DataFrame,
