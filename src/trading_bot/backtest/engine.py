@@ -17,7 +17,9 @@ from trading_bot.backtest.models import (
 from trading_bot.backtest.position_sizing import (
     PositionSizingModel,
 )
-
+from trading_bot.backtest.risk_controls import (
+    DailyLossLimit,
+)
 
 VALID_SIGNALS = {
     "hold",
@@ -275,13 +277,38 @@ def _execute_exit(
 
     return trade, cash_proceeds
 
+def _record_realized_trade(
+    trades: list[Trade],
+    realized_net_pnl_by_session: dict[
+        pd.Timestamp,
+        float,
+    ],
+    trade: Trade,
+) -> None:
+    """Record a trade and attribute net P&L to its exit session."""
 
+    trades.append(trade)
+
+    exit_session = _session_date(
+        pd.Timestamp(trade.exit_time)
+    )
+
+    realized_net_pnl_by_session[
+        exit_session
+    ] = (
+        realized_net_pnl_by_session.get(
+            exit_session,
+            0.0,
+        )
+        + trade.resolved_net_pnl
+    )
 def run_backtest(
     frame: pd.DataFrame,
     starting_cash: float = 10_000.0,
     symbol: str | None = None,
     cost_model: ExecutionCostModel | None = None,
     position_sizing: PositionSizingModel | None = None,
+    daily_loss_limit: DailyLossLimit | None = None,
 ) -> BacktestResult:
     """Run a deterministic next-bar-open backtest."""
 
@@ -317,6 +344,11 @@ def run_backtest(
     trades: list[Trade] = []
     skipped_entries: list[SkippedEntry] = []
     equity_rows: list[dict[str, object]] = []
+
+    realized_net_pnl_by_session: dict[
+        pd.Timestamp,
+        float,
+    ] = {}
 
     position_open = False
     position_quantity = 0
@@ -404,7 +436,13 @@ def run_backtest(
                     )
                 )
 
-                trades.append(trade)
+                _record_realized_trade(
+                    trades=trades,
+                    realized_net_pnl_by_session=(
+                        realized_net_pnl_by_session
+                    ),
+                    trade=trade,
+                )
                 current_cash += cash_proceeds
 
                 position_open = False
@@ -422,8 +460,7 @@ def run_backtest(
                 )
 
                 candidate_fill_price = (
-                    execution_costs
-                    .adjusted_fill_price(
+                    execution_costs.adjusted_fill_price(
                         reference_price=(
                             candidate_reference_price
                         ),
@@ -436,20 +473,15 @@ def run_backtest(
                 )
 
                 candidate_commission = (
-                    execution_costs
-                    .commission_for_order(
+                    execution_costs.commission_for_order(
                         requested_quantity
                     )
                 )
 
-                entry_quantity = (
-                    sizing_model
-                    .quantity_for_entry(
+                required_cash = (
+                    sizing_model.required_cash(
                         fill_price=(
                             candidate_fill_price
-                        ),
-                        available_cash=(
-                            current_cash
                         ),
                         commission=(
                             candidate_commission
@@ -457,18 +489,21 @@ def run_backtest(
                     )
                 )
 
-                if entry_quantity == 0:
-                    required_cash = (
-                        sizing_model.required_cash(
-                            fill_price=(
-                                candidate_fill_price
-                            ),
-                            commission=(
-                                candidate_commission
-                            ),
-                        )
+                session_realized_net_pnl = (
+                    realized_net_pnl_by_session.get(
+                        current_session,
+                        0.0,
                     )
+                )
 
+                blocked_by_daily_loss = (
+                    daily_loss_limit is not None
+                    and not daily_loss_limit.entry_allowed(
+                        session_realized_net_pnl
+                    )
+                )
+
+                if blocked_by_daily_loss:
                     skipped_entries.append(
                         SkippedEntry(
                             symbol=symbol,
@@ -499,43 +534,98 @@ def run_backtest(
                                 sizing_model
                                 .max_cash_fraction
                             ),
-                            reason=(
-                                "insufficient_cash_or_"
-                                "allocation_limit"
-                            ),
+                            reason="daily_loss_limit",
                         )
                     )
 
                 else:
-                    position_open = True
-                    position_quantity = (
-                        entry_quantity
+                    entry_quantity = (
+                        sizing_model.quantity_for_entry(
+                            fill_price=(
+                                candidate_fill_price
+                            ),
+                            available_cash=(
+                                current_cash
+                            ),
+                            commission=(
+                                candidate_commission
+                            ),
+                        )
                     )
 
-                    entry_reference_price = (
-                        candidate_reference_price
-                    )
+                    if entry_quantity == 0:
+                        skipped_entries.append(
+                            SkippedEntry(
+                                symbol=symbol,
+                                signal_time=(
+                                    previous_row[
+                                        "timestamp"
+                                    ]
+                                ),
+                                execution_time=(
+                                    current_time
+                                ),
+                                reference_price=(
+                                    candidate_reference_price
+                                ),
+                                adjusted_fill_price=(
+                                    candidate_fill_price
+                                ),
+                                requested_quantity=(
+                                    requested_quantity
+                                ),
+                                required_cash=(
+                                    required_cash
+                                ),
+                                available_cash=(
+                                    current_cash
+                                ),
+                                max_cash_fraction=(
+                                    sizing_model
+                                    .max_cash_fraction
+                                ),
+                                reason=(
+                                    "insufficient_cash_or_"
+                                    "allocation_limit"
+                                ),
+                            )
+                        )
 
-                    entry_price = (
-                        candidate_fill_price
-                    )
+                    else:
+                        position_open = True
+                        position_quantity = (
+                            entry_quantity
+                        )
 
-                    entry_commission = (
-                        candidate_commission
-                    )
+                        entry_reference_price = (
+                            candidate_reference_price
+                        )
 
-                    entry_time = current_time
-                    entry_signal_time = (
-                        previous_row["timestamp"]
-                    )
-                    entry_index = index
+                        entry_price = (
+                            candidate_fill_price
+                        )
 
-                    current_cash -= (
-                        entry_price
-                        * position_quantity
-                        + entry_commission
-                    )
+                        entry_commission = (
+                            candidate_commission
+                        )
 
+                        entry_time = current_time
+
+                        entry_signal_time = (
+                            previous_row[
+                                "timestamp"
+                            ]
+                        )
+
+                        entry_index = index
+
+                        current_cash -= (
+                            entry_price
+                            * position_quantity
+                            + entry_commission
+                        )
+
+                
             if (
                 previous_row["signal"]
                 == "exit_long"
@@ -581,7 +671,13 @@ def run_backtest(
                     )
                 )
 
-                trades.append(trade)
+                _record_realized_trade(
+                    trades=trades,
+                    realized_net_pnl_by_session=(
+                        realized_net_pnl_by_session
+                    ),
+                    trade=trade,
+                )
                 current_cash += cash_proceeds
 
                 position_open = False
@@ -652,7 +748,13 @@ def run_backtest(
                 )
             )
 
-            trades.append(trade)
+            _record_realized_trade(
+                trades=trades,
+                realized_net_pnl_by_session=(
+                    realized_net_pnl_by_session
+                ),
+                trade=trade,
+            )
             current_cash += cash_proceeds
 
             position_open = False
