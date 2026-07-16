@@ -90,3 +90,33 @@ The strategy produced only a marginal positive result during development and fai
 The frozen 9/21 EMA strategy will be retained as a deterministic software and testing baseline, but it is not currently considered a viable paper-trading candidate.
 
 The unseen evaluation period is now classified as seen data and will not be reused as an untouched holdout period.
+
+### Baseline comparison
+
+The one-share buy-and-hold reference produced:
+
+- Development gross P&L: $145.68
+- Development account return: 1.4568%
+- Evaluation gross P&L: $130.26
+- Evaluation account return: 1.3026%
+
+The baseline held overnight and maintained substantially more market
+exposure, so it is not a risk-equivalent comparison. Nevertheless, the
+EMA strategy failed to provide meaningful incremental value.
+
+The EMA strategy earned only $17.67 during development and lost $19.58
+during evaluation. Its average winner and average loser remained
+relatively stable, but its win rate declined from 49.47% to 41.94%.
+
+### Phase 2 decision
+
+Phase 2 is complete.
+
+The 9/21 EMA crossover strategy will remain in the repository as a
+deterministic software baseline and regression-test strategy. It will
+not advance directly into paper trading because it did not demonstrate
+robust performance on the frozen evaluation period.
+
+Future strategy experiments must receive a new experiment identifier.
+The July 2025 through June 2026 period is now seen data and cannot be
+described as an untouched holdout period.
