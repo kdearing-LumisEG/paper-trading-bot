@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 
 import pandas as pd
@@ -20,6 +21,12 @@ from trading_bot.backtest.position_sizing import (
 from trading_bot.backtest.risk_controls import (
     DailyLossLimit,
 )
+from trading_bot.backtest.risk_manager import (
+    RiskManager,
+    SessionRiskConfig,
+    SessionRiskSnapshot,
+)
+
 
 VALID_SIGNALS = {
     "hold",
@@ -27,9 +34,24 @@ VALID_SIGNALS = {
     "exit_long",
 }
 
+INSUFFICIENT_CAPITAL_REASON = (
+    "insufficient_cash_or_allocation_limit"
+)
+
 
 class BacktestError(ValueError):
     """Raised when backtest inputs fail validation."""
+
+
+@dataclass(frozen=True)
+class _EntryPlan:
+    reference_price: float
+    fill_price: float
+    commission: float
+    requested_quantity: int
+    required_cash: float
+    approved_quantity: int
+    skipped_entry: SkippedEntry | None
 
 
 def _normalize_timestamp(
@@ -277,31 +299,186 @@ def _execute_exit(
 
     return trade, cash_proceeds
 
+
+def _build_skipped_entry(
+    *,
+    symbol: str | None,
+    signal_time: datetime,
+    execution_time: datetime,
+    reference_price: float,
+    adjusted_fill_price: float,
+    requested_quantity: int,
+    required_cash: float,
+    available_cash: float,
+    max_cash_fraction: float,
+    reason: str,
+    snapshot: SessionRiskSnapshot,
+) -> SkippedEntry:
+    return SkippedEntry(
+        symbol=symbol,
+        signal_time=signal_time,
+        execution_time=execution_time,
+        reference_price=reference_price,
+        adjusted_fill_price=(
+            adjusted_fill_price
+        ),
+        requested_quantity=requested_quantity,
+        required_cash=required_cash,
+        available_cash=available_cash,
+        max_cash_fraction=max_cash_fraction,
+        reason=reason,
+        session_date=snapshot.session_date,
+        session_realized_net_pnl=(
+            snapshot.realized_net_pnl
+        ),
+        session_trades_started=(
+            snapshot.trades_started
+        ),
+        session_consecutive_losses=(
+            snapshot.consecutive_losses
+        ),
+    )
+
+
+def _evaluate_entry(
+    *,
+    symbol: str | None,
+    signal_time: datetime,
+    execution_time: datetime,
+    session: pd.Timestamp,
+    reference_price: float,
+    available_cash: float,
+    cost_model: ExecutionCostModel,
+    sizing_model: PositionSizingModel,
+    risk_manager: RiskManager,
+) -> _EntryPlan:
+    fill_price = cost_model.adjusted_fill_price(
+        reference_price=reference_price,
+        side="buy",
+    )
+
+    requested_quantity = sizing_model.quantity
+
+    commission = (
+        cost_model.commission_for_order(
+            requested_quantity
+        )
+    )
+
+    required_cash = sizing_model.required_cash(
+        fill_price=fill_price,
+        commission=commission,
+    )
+
+    decision = risk_manager.evaluate_entry(
+        session
+    )
+
+    if not decision.allowed:
+        assert decision.reason is not None
+
+        skipped_entry = _build_skipped_entry(
+            symbol=symbol,
+            signal_time=signal_time,
+            execution_time=execution_time,
+            reference_price=reference_price,
+            adjusted_fill_price=fill_price,
+            requested_quantity=requested_quantity,
+            required_cash=required_cash,
+            available_cash=available_cash,
+            max_cash_fraction=(
+                sizing_model.max_cash_fraction
+            ),
+            reason=decision.reason,
+            snapshot=decision.snapshot,
+        )
+
+        return _EntryPlan(
+            reference_price=reference_price,
+            fill_price=fill_price,
+            commission=commission,
+            requested_quantity=requested_quantity,
+            required_cash=required_cash,
+            approved_quantity=0,
+            skipped_entry=skipped_entry,
+        )
+
+    approved_quantity = (
+        sizing_model.quantity_for_entry(
+            fill_price=fill_price,
+            available_cash=available_cash,
+            commission=commission,
+        )
+    )
+
+    if approved_quantity == 0:
+        skipped_entry = _build_skipped_entry(
+            symbol=symbol,
+            signal_time=signal_time,
+            execution_time=execution_time,
+            reference_price=reference_price,
+            adjusted_fill_price=fill_price,
+            requested_quantity=requested_quantity,
+            required_cash=required_cash,
+            available_cash=available_cash,
+            max_cash_fraction=(
+                sizing_model.max_cash_fraction
+            ),
+            reason=INSUFFICIENT_CAPITAL_REASON,
+            snapshot=decision.snapshot,
+        )
+
+        return _EntryPlan(
+            reference_price=reference_price,
+            fill_price=fill_price,
+            commission=commission,
+            requested_quantity=requested_quantity,
+            required_cash=required_cash,
+            approved_quantity=0,
+            skipped_entry=skipped_entry,
+        )
+
+    return _EntryPlan(
+        reference_price=reference_price,
+        fill_price=fill_price,
+        commission=commission,
+        requested_quantity=requested_quantity,
+        required_cash=required_cash,
+        approved_quantity=approved_quantity,
+        skipped_entry=None,
+    )
+
+
 def _record_realized_trade(
     trades: list[Trade],
-    realized_net_pnl_by_session: dict[
-        pd.Timestamp,
-        float,
-    ],
+    risk_manager: RiskManager,
     trade: Trade,
 ) -> None:
-    """Record a trade and attribute net P&L to its exit session."""
-
     trades.append(trade)
+    risk_manager.record_trade(trade)
 
-    exit_session = _session_date(
-        pd.Timestamp(trade.exit_time)
-    )
 
-    realized_net_pnl_by_session[
-        exit_session
-    ] = (
-        realized_net_pnl_by_session.get(
-            exit_session,
-            0.0,
+def _resolve_risk_config(
+    session_risk: SessionRiskConfig | None,
+    daily_loss_limit: DailyLossLimit | None,
+) -> SessionRiskConfig:
+    if (
+        session_risk is not None
+        and daily_loss_limit is not None
+    ):
+        raise BacktestError(
+            "Provide either session_risk or daily_loss_limit, "
+            "not both."
         )
-        + trade.resolved_net_pnl
+
+    if session_risk is not None:
+        return session_risk
+
+    return SessionRiskConfig(
+        daily_loss_limit=daily_loss_limit
     )
+
+
 def run_backtest(
     frame: pd.DataFrame,
     starting_cash: float = 10_000.0,
@@ -309,6 +486,7 @@ def run_backtest(
     cost_model: ExecutionCostModel | None = None,
     position_sizing: PositionSizingModel | None = None,
     daily_loss_limit: DailyLossLimit | None = None,
+    session_risk: SessionRiskConfig | None = None,
 ) -> BacktestResult:
     """Run a deterministic next-bar-open backtest."""
 
@@ -322,10 +500,18 @@ def run_backtest(
         if cost_model is not None
         else ExecutionCostModel()
     )
+
     sizing_model = (
         position_sizing
         if position_sizing is not None
         else PositionSizingModel()
+    )
+
+    risk_manager = RiskManager(
+        _resolve_risk_config(
+            session_risk=session_risk,
+            daily_loss_limit=daily_loss_limit,
+        )
     )
 
     if symbol is None and "symbol" in bars.columns:
@@ -344,11 +530,6 @@ def run_backtest(
     trades: list[Trade] = []
     skipped_entries: list[SkippedEntry] = []
     equity_rows: list[dict[str, object]] = []
-
-    realized_net_pnl_by_session: dict[
-        pd.Timestamp,
-        float,
-    ] = {}
 
     position_open = False
     position_quantity = 0
@@ -438,13 +619,11 @@ def run_backtest(
 
                 _record_realized_trade(
                     trades=trades,
-                    realized_net_pnl_by_session=(
-                        realized_net_pnl_by_session
-                    ),
+                    risk_manager=risk_manager,
                     trade=trade,
                 )
-                current_cash += cash_proceeds
 
+                current_cash += cash_proceeds
                 position_open = False
                 position_quantity = 0
 
@@ -455,177 +634,62 @@ def run_backtest(
                 and previous_session
                 == current_session
             ):
-                candidate_reference_price = float(
-                    row["open"]
+                entry_plan = _evaluate_entry(
+                    symbol=symbol,
+                    signal_time=previous_row[
+                        "timestamp"
+                    ],
+                    execution_time=current_time,
+                    session=current_session,
+                    reference_price=float(
+                        row["open"]
+                    ),
+                    available_cash=current_cash,
+                    cost_model=execution_costs,
+                    sizing_model=sizing_model,
+                    risk_manager=risk_manager,
                 )
 
-                candidate_fill_price = (
-                    execution_costs.adjusted_fill_price(
-                        reference_price=(
-                            candidate_reference_price
-                        ),
-                        side="buy",
-                    )
-                )
-
-                requested_quantity = (
-                    sizing_model.quantity
-                )
-
-                candidate_commission = (
-                    execution_costs.commission_for_order(
-                        requested_quantity
-                    )
-                )
-
-                required_cash = (
-                    sizing_model.required_cash(
-                        fill_price=(
-                            candidate_fill_price
-                        ),
-                        commission=(
-                            candidate_commission
-                        ),
-                    )
-                )
-
-                session_realized_net_pnl = (
-                    realized_net_pnl_by_session.get(
-                        current_session,
-                        0.0,
-                    )
-                )
-
-                blocked_by_daily_loss = (
-                    daily_loss_limit is not None
-                    and not daily_loss_limit.entry_allowed(
-                        session_realized_net_pnl
-                    )
-                )
-
-                if blocked_by_daily_loss:
+                if entry_plan.skipped_entry is not None:
                     skipped_entries.append(
-                        SkippedEntry(
-                            symbol=symbol,
-                            signal_time=(
-                                previous_row[
-                                    "timestamp"
-                                ]
-                            ),
-                            execution_time=(
-                                current_time
-                            ),
-                            reference_price=(
-                                candidate_reference_price
-                            ),
-                            adjusted_fill_price=(
-                                candidate_fill_price
-                            ),
-                            requested_quantity=(
-                                requested_quantity
-                            ),
-                            required_cash=(
-                                required_cash
-                            ),
-                            available_cash=(
-                                current_cash
-                            ),
-                            max_cash_fraction=(
-                                sizing_model
-                                .max_cash_fraction
-                            ),
-                            reason="daily_loss_limit",
-                        )
+                        entry_plan.skipped_entry
                     )
-
                 else:
-                    entry_quantity = (
-                        sizing_model.quantity_for_entry(
-                            fill_price=(
-                                candidate_fill_price
-                            ),
-                            available_cash=(
-                                current_cash
-                            ),
-                            commission=(
-                                candidate_commission
-                            ),
-                        )
+                    position_open = True
+                    position_quantity = (
+                        entry_plan.approved_quantity
                     )
 
-                    if entry_quantity == 0:
-                        skipped_entries.append(
-                            SkippedEntry(
-                                symbol=symbol,
-                                signal_time=(
-                                    previous_row[
-                                        "timestamp"
-                                    ]
-                                ),
-                                execution_time=(
-                                    current_time
-                                ),
-                                reference_price=(
-                                    candidate_reference_price
-                                ),
-                                adjusted_fill_price=(
-                                    candidate_fill_price
-                                ),
-                                requested_quantity=(
-                                    requested_quantity
-                                ),
-                                required_cash=(
-                                    required_cash
-                                ),
-                                available_cash=(
-                                    current_cash
-                                ),
-                                max_cash_fraction=(
-                                    sizing_model
-                                    .max_cash_fraction
-                                ),
-                                reason=(
-                                    "insufficient_cash_or_"
-                                    "allocation_limit"
-                                ),
-                            )
-                        )
+                    entry_reference_price = (
+                        entry_plan.reference_price
+                    )
 
-                    else:
-                        position_open = True
-                        position_quantity = (
-                            entry_quantity
-                        )
+                    entry_price = (
+                        entry_plan.fill_price
+                    )
 
-                        entry_reference_price = (
-                            candidate_reference_price
-                        )
+                    entry_commission = (
+                        entry_plan.commission
+                    )
 
-                        entry_price = (
-                            candidate_fill_price
-                        )
+                    entry_time = current_time
 
-                        entry_commission = (
-                            candidate_commission
-                        )
+                    entry_signal_time = (
+                        previous_row["timestamp"]
+                    )
 
-                        entry_time = current_time
+                    entry_index = index
 
-                        entry_signal_time = (
-                            previous_row[
-                                "timestamp"
-                            ]
-                        )
+                    current_cash -= (
+                        entry_price
+                        * position_quantity
+                        + entry_commission
+                    )
 
-                        entry_index = index
+                    risk_manager.record_entry(
+                        current_session
+                    )
 
-                        current_cash -= (
-                            entry_price
-                            * position_quantity
-                            + entry_commission
-                        )
-
-                
             if (
                 previous_row["signal"]
                 == "exit_long"
@@ -673,13 +737,11 @@ def run_backtest(
 
                 _record_realized_trade(
                     trades=trades,
-                    realized_net_pnl_by_session=(
-                        realized_net_pnl_by_session
-                    ),
+                    risk_manager=risk_manager,
                     trade=trade,
                 )
-                current_cash += cash_proceeds
 
+                current_cash += cash_proceeds
                 position_open = False
                 position_quantity = 0
 
@@ -750,17 +812,13 @@ def run_backtest(
 
             _record_realized_trade(
                 trades=trades,
-                realized_net_pnl_by_session=(
-                    realized_net_pnl_by_session
-                ),
+                risk_manager=risk_manager,
                 trade=trade,
             )
-            current_cash += cash_proceeds
 
+            current_cash += cash_proceeds
             position_open = False
             position_quantity = 0
-
-           
 
     equity_curve = pd.DataFrame(
         equity_rows
@@ -784,4 +842,7 @@ def run_backtest(
         starting_cash=starting_cash,
         equity_curve=equity_curve,
         skipped_entries=skipped_entries,
+        risk_control_settings=(
+            risk_manager.settings()
+        ),
     )

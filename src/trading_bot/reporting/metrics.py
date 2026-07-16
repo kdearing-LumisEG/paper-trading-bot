@@ -21,6 +21,8 @@ class PerformanceMetrics:
     maximum_drawdown_pct: float | None
     number_of_trades: int
     number_of_skipped_entries: int
+    skipped_entries_by_reason: dict[str, int]
+    risk_control_settings: dict[str, object]
     winning_trades: int
     losing_trades: int
     win_rate_pct: float | None
@@ -243,6 +245,12 @@ class PerformanceMetrics:
             number_of_skipped_entries=(
                 backtest_result.number_of_skipped_entries
             ),
+            skipped_entries_by_reason=(
+                backtest_result.skipped_entries_by_reason
+            ),
+            risk_control_settings=dict(
+                backtest_result.risk_control_settings
+            ),
             winning_trades=winning_trades,
             losing_trades=losing_trades,
             win_rate_pct=win_rate_pct,
@@ -297,6 +305,12 @@ class PerformanceMetrics:
             "number_of_skipped_entries": (
                 self.number_of_skipped_entries
             ),
+            "skipped_entries_by_reason": dict(
+                self.skipped_entries_by_reason
+            ),
+            "risk_control_settings": dict(
+                self.risk_control_settings
+            ),
             "winning_trades": (
                 self.winning_trades
             ),
@@ -336,3 +350,4 @@ class PerformanceMetrics:
                 self.baseline_note
             ),
         }
+

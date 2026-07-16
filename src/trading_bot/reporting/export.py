@@ -18,6 +18,10 @@ SKIPPED_ENTRY_COLUMNS = [
     "available_cash",
     "max_cash_fraction",
     "reason",
+    "session_date",
+    "session_realized_net_pnl",
+    "session_trades_started",
+    "session_consecutive_losses",
 ]
 
 
@@ -164,3 +168,4 @@ def export_backtest_report(
             )
         ),
     }
+

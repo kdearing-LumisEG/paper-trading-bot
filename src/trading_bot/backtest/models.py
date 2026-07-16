@@ -1,8 +1,9 @@
 """Structured models for backtest trades and results."""
 
+from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Iterable
+from datetime import date, datetime
+from typing import Iterable, Mapping
 
 import pandas as pd
 
@@ -21,6 +22,10 @@ class SkippedEntry:
     available_cash: float
     max_cash_fraction: float
     reason: str
+    session_date: date | None = None
+    session_realized_net_pnl: float = 0.0
+    session_trades_started: int = 0
+    session_consecutive_losses: int = 0
 
 
 @dataclass(frozen=True)
@@ -72,12 +77,29 @@ class BacktestResult:
     total_slippage_cost: float = 0.0
     total_costs: float = 0.0
     net_pnl: float = 0.0
+    risk_control_settings: dict[
+        str,
+        object,
+    ] = field(default_factory=dict)
 
     @property
     def number_of_skipped_entries(self) -> int:
         """Return the number of rejected entry signals."""
 
         return len(self.skipped_entries)
+
+    @property
+    def skipped_entries_by_reason(
+        self,
+    ) -> dict[str, int]:
+        """Return rejected entry counts grouped by reason."""
+
+        return dict(
+            Counter(
+                entry.reason
+                for entry in self.skipped_entries
+            )
+        )
 
     @classmethod
     def from_trades(
@@ -87,6 +109,9 @@ class BacktestResult:
         equity_curve: pd.DataFrame | None = None,
         skipped_entries: (
             Iterable[SkippedEntry] | None
+        ) = None,
+        risk_control_settings: (
+            Mapping[str, object] | None
         ) = None,
     ) -> "BacktestResult":
         trades_list = list(trades)
@@ -140,6 +165,9 @@ class BacktestResult:
             ),
             total_costs=total_costs,
             net_pnl=net_pnl,
+            risk_control_settings=dict(
+                risk_control_settings or {}
+            ),
         )
 
     def to_frame(self) -> pd.DataFrame:
@@ -220,6 +248,21 @@ class BacktestResult:
                         entry.max_cash_fraction
                     ),
                     "reason": entry.reason,
+                    "session_date": (
+                        entry.session_date.isoformat()
+                        if entry.session_date
+                        is not None
+                        else None
+                    ),
+                    "session_realized_net_pnl": (
+                        entry.session_realized_net_pnl
+                    ),
+                    "session_trades_started": (
+                        entry.session_trades_started
+                    ),
+                    "session_consecutive_losses": (
+                        entry.session_consecutive_losses
+                    ),
                 }
                 for entry in self.skipped_entries
             ]
