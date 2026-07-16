@@ -23,3 +23,38 @@
 
 - Baseline is a reference only and represents a one-share buy-and-hold position entered at the first bar open and exited at the final bar close.
 - Experiment output files are exported to `logs/backtests/spy_15min_ema_9_21_baseline/`.
+
+## Frozen EMA 9/21 Period Evaluation
+
+**Protocol frozen:** 2026-07-16
+
+### Strategy
+
+- Symbol: SPY
+- Bar interval: 15 minutes
+- Fast EMA: 9
+- Slow EMA: 21
+- Position size: 1 share
+- Direction: long only
+- Entry execution: next bar open
+- Exit execution: next bar open
+- Overnight positions: not allowed
+- Starting cash: $10,000
+- Costs and slippage: not included in this Phase 2 experiment
+
+### Research periods
+
+- Development: 2024-01-01 through 2025-06-30
+- Unseen evaluation: 2025-07-01 through 2026-06-30
+
+### Data handling
+
+- Indicators are calculated independently inside each period.
+- The evaluation period does not inherit EMA state from development data.
+- Incomplete source sessions are excluded in full and documented.
+- Parameters will not be changed after viewing evaluation results.
+- Once executed, the unseen evaluation period becomes seen data.
+
+### Purpose
+
+Evaluate whether the unchanged deterministic EMA crossover strategy behaves consistently outside the development period. This experiment is not evidence of live profitability because transaction costs, slippage, latency, and operational failures are not yet modeled.
