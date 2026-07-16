@@ -11,7 +11,11 @@ from trading_bot.backtest.costs import (
 )
 from trading_bot.backtest.models import (
     BacktestResult,
+    SkippedEntry,
     Trade,
+)
+from trading_bot.backtest.position_sizing import (
+    PositionSizingModel,
 )
 
 
@@ -277,6 +281,7 @@ def run_backtest(
     starting_cash: float = 10_000.0,
     symbol: str | None = None,
     cost_model: ExecutionCostModel | None = None,
+    position_sizing: PositionSizingModel | None = None,
 ) -> BacktestResult:
     """Run a deterministic next-bar-open backtest."""
 
@@ -289,6 +294,11 @@ def run_backtest(
         cost_model
         if cost_model is not None
         else ExecutionCostModel()
+    )
+    sizing_model = (
+        position_sizing
+        if position_sizing is not None
+        else PositionSizingModel()
     )
 
     if symbol is None and "symbol" in bars.columns:
@@ -305,6 +315,7 @@ def run_backtest(
         )
 
     trades: list[Trade] = []
+    skipped_entries: list[SkippedEntry] = []
     equity_rows: list[dict[str, object]] = []
 
     position_open = False
@@ -406,41 +417,124 @@ def run_backtest(
                 and previous_session
                 == current_session
             ):
-                position_open = True
-                position_quantity = 1
-
-                entry_reference_price = float(
+                candidate_reference_price = float(
                     row["open"]
                 )
 
-                entry_price = (
+                candidate_fill_price = (
                     execution_costs
                     .adjusted_fill_price(
                         reference_price=(
-                            entry_reference_price
+                            candidate_reference_price
                         ),
                         side="buy",
                     )
                 )
 
-                entry_commission = (
+                requested_quantity = (
+                    sizing_model.quantity
+                )
+
+                candidate_commission = (
                     execution_costs
                     .commission_for_order(
-                        position_quantity
+                        requested_quantity
                     )
                 )
 
-                entry_time = current_time
-                entry_signal_time = (
-                    previous_row["timestamp"]
+                entry_quantity = (
+                    sizing_model
+                    .quantity_for_entry(
+                        fill_price=(
+                            candidate_fill_price
+                        ),
+                        available_cash=(
+                            current_cash
+                        ),
+                        commission=(
+                            candidate_commission
+                        ),
+                    )
                 )
-                entry_index = index
 
-                current_cash -= (
-                    entry_price
-                    * position_quantity
-                    + entry_commission
-                )
+                if entry_quantity == 0:
+                    required_cash = (
+                        sizing_model.required_cash(
+                            fill_price=(
+                                candidate_fill_price
+                            ),
+                            commission=(
+                                candidate_commission
+                            ),
+                        )
+                    )
+
+                    skipped_entries.append(
+                        SkippedEntry(
+                            symbol=symbol,
+                            signal_time=(
+                                previous_row[
+                                    "timestamp"
+                                ]
+                            ),
+                            execution_time=(
+                                current_time
+                            ),
+                            reference_price=(
+                                candidate_reference_price
+                            ),
+                            adjusted_fill_price=(
+                                candidate_fill_price
+                            ),
+                            requested_quantity=(
+                                requested_quantity
+                            ),
+                            required_cash=(
+                                required_cash
+                            ),
+                            available_cash=(
+                                current_cash
+                            ),
+                            max_cash_fraction=(
+                                sizing_model
+                                .max_cash_fraction
+                            ),
+                            reason=(
+                                "insufficient_cash_or_"
+                                "allocation_limit"
+                            ),
+                        )
+                    )
+
+                else:
+                    position_open = True
+                    position_quantity = (
+                        entry_quantity
+                    )
+
+                    entry_reference_price = (
+                        candidate_reference_price
+                    )
+
+                    entry_price = (
+                        candidate_fill_price
+                    )
+
+                    entry_commission = (
+                        candidate_commission
+                    )
+
+                    entry_time = current_time
+                    entry_signal_time = (
+                        previous_row["timestamp"]
+                    )
+                    entry_index = index
+
+                    current_cash -= (
+                        entry_price
+                        * position_quantity
+                        + entry_commission
+                    )
 
             if (
                 previous_row["signal"]
@@ -587,4 +681,5 @@ def run_backtest(
         trades=trades,
         starting_cash=starting_cash,
         equity_curve=equity_curve,
+        skipped_entries=skipped_entries,
     )

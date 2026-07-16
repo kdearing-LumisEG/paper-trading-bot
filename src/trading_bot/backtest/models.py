@@ -8,6 +8,22 @@ import pandas as pd
 
 
 @dataclass(frozen=True)
+class SkippedEntry:
+    """An entry signal rejected by a risk or sizing rule."""
+
+    symbol: str | None
+    signal_time: datetime
+    execution_time: datetime
+    reference_price: float
+    adjusted_fill_price: float
+    requested_quantity: int
+    required_cash: float
+    available_cash: float
+    max_cash_fraction: float
+    reason: str
+
+
+@dataclass(frozen=True)
 class Trade:
     symbol: str | None
     entry_signal_time: datetime
@@ -49,10 +65,19 @@ class BacktestResult:
     equity_curve: pd.DataFrame = field(
         default_factory=pd.DataFrame
     )
+    skipped_entries: list[SkippedEntry] = field(
+        default_factory=list
+    )
     total_commissions: float = 0.0
     total_slippage_cost: float = 0.0
     total_costs: float = 0.0
     net_pnl: float = 0.0
+
+    @property
+    def number_of_skipped_entries(self) -> int:
+        """Return the number of rejected entry signals."""
+
+        return len(self.skipped_entries)
 
     @classmethod
     def from_trades(
@@ -60,8 +85,14 @@ class BacktestResult:
         trades: Iterable[Trade],
         starting_cash: float,
         equity_curve: pd.DataFrame | None = None,
+        skipped_entries: (
+            Iterable[SkippedEntry] | None
+        ) = None,
     ) -> "BacktestResult":
         trades_list = list(trades)
+        skipped_entries_list = list(
+            skipped_entries or ()
+        )
 
         gross_pnl = sum(
             trade.gross_pnl
@@ -102,6 +133,7 @@ class BacktestResult:
                 if equity_curve is not None
                 else pd.DataFrame()
             ),
+            skipped_entries=skipped_entries_list,
             total_commissions=total_commissions,
             total_slippage_cost=(
                 total_slippage_cost
@@ -111,6 +143,8 @@ class BacktestResult:
         )
 
     def to_frame(self) -> pd.DataFrame:
+        """Return completed trades as a dataframe."""
+
         return pd.DataFrame(
             [
                 {
@@ -151,5 +185,42 @@ class BacktestResult:
                     "bars_held": trade.bars_held,
                 }
                 for trade in self.trades
+            ]
+        )
+
+    def skipped_entries_to_frame(
+        self,
+    ) -> pd.DataFrame:
+        """Return rejected entry signals as a dataframe."""
+
+        return pd.DataFrame(
+            [
+                {
+                    "symbol": entry.symbol,
+                    "signal_time": entry.signal_time,
+                    "execution_time": (
+                        entry.execution_time
+                    ),
+                    "reference_price": (
+                        entry.reference_price
+                    ),
+                    "adjusted_fill_price": (
+                        entry.adjusted_fill_price
+                    ),
+                    "requested_quantity": (
+                        entry.requested_quantity
+                    ),
+                    "required_cash": (
+                        entry.required_cash
+                    ),
+                    "available_cash": (
+                        entry.available_cash
+                    ),
+                    "max_cash_fraction": (
+                        entry.max_cash_fraction
+                    ),
+                    "reason": entry.reason,
+                }
+                for entry in self.skipped_entries
             ]
         )
