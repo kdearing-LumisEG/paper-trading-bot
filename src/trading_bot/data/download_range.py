@@ -59,6 +59,7 @@ def run_range_download(
     end_date: date,
     output_directory: Path = Path("data/processed"),
     overwrite: bool = False,
+    exclude_incomplete_sessions: bool = False,
     fetch_chunk: ChunkFetcher | None = None,
     show_progress: bool = True,
     generated_at_utc: datetime | None = None,
@@ -91,6 +92,9 @@ def run_range_download(
         timeframe_minutes=settings.timeframe_minutes,
         start_date=start_date,
         end_date=end_date,
+        exclude_incomplete_sessions=(
+            exclude_incomplete_sessions
+        ),
     )
 
     paths = save_audited_range(
@@ -164,6 +168,15 @@ def build_parser() -> ArgumentParser:
         "--overwrite",
         action="store_true",
         help="Allow replacement of existing output files.",
+    )
+
+    parser.add_argument(
+        "--exclude-incomplete-sessions",
+        action="store_true",
+        help=(
+            "Remove incomplete exchange sessions in full "
+            "and record them in dataset metadata."
+        ),
     )
 
     return parser
@@ -249,9 +262,25 @@ def _print_summary(
         f"{audited.actual_bar_count}"
     )
     print(
-        f"Exchange sessions: "
+        f"Requested exchange sessions: "
+        f"{audited.requested_session_count}"
+    )
+    print(
+        f"Retained exchange sessions: "
         f"{audited.session_count}"
     )
+    print(
+        f"Excluded exchange sessions: "
+        f"{len(audited.excluded_session_dates)}"
+    )
+
+    if audited.excluded_session_dates:
+        print("Excluded session details:")
+
+        for session_date in (
+            audited.excluded_session_dates
+        ):
+            print(f"  {session_date.isoformat()}")
     print(
         f"Expected bars: "
         f"{audited.expected_bar_count}"
@@ -313,6 +342,9 @@ def main(
         end_date=end_date,
         output_directory=arguments.output_directory,
         overwrite=arguments.overwrite,
+        exclude_incomplete_sessions=(
+            arguments.exclude_incomplete_sessions
+        ),
     )
 
     _print_summary(

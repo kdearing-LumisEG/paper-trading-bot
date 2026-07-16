@@ -189,8 +189,33 @@ def test_metadata_contains_required_fields() -> None:
     ] == "2024-01-02T14:45:00+00:00"
 
     assert metadata["row_count"] == 2
+
+    assert metadata[
+        "requested_session_count"
+    ] == 1
+
     assert metadata["session_count"] == 1
-    assert metadata["expected_bar_count"] == 2
+
+    assert metadata[
+        "excluded_session_count"
+    ] == 0
+
+    assert metadata[
+        "excluded_session_dates"
+    ] == []
+
+    assert metadata[
+        "excluded_missing_bar_count"
+    ] == 0
+
+    assert metadata[
+        "expected_bar_count"
+    ] == 2
+
+    assert metadata[
+        "requested_expected_bar_count"
+    ] == 2
+
     assert metadata["actual_bar_count"] == 2
     assert metadata["missing_bar_count"] == 0
     assert metadata["unexpected_bar_count"] == 0

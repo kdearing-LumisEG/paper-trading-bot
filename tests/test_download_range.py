@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pandas as pd
 
+import pytest
+
 from trading_bot.config import (
     Settings,
     StrategySettings,
@@ -14,7 +16,11 @@ from trading_bot.data.date_ranges import (
     DateRangeChunk,
 )
 from trading_bot.data.download_range import (
+    build_parser,
     run_range_download,
+)
+from trading_bot.data.range_audit import (
+    RangeCoverageError,
 )
 
 
@@ -209,4 +215,162 @@ def test_pipeline_does_not_modify_fake_source_frame(
     pd.testing.assert_frame_equal(
         source_frame,
         source_copy,
+    )
+def fake_complete_and_incomplete_sessions(
+    chunk: DateRangeChunk,
+) -> pd.DataFrame:
+    """Return one complete session and one incomplete session."""
+
+    frames: list[pd.DataFrame] = []
+
+    january_second = date(2024, 1, 2)
+
+    if (
+        chunk.start.date()
+        <= january_second
+        < chunk.end.date()
+    ):
+        timestamps = pd.date_range(
+            start="2024-01-02T14:30:00Z",
+            periods=26,
+            freq="15min",
+        )
+
+        frames.append(
+            pd.DataFrame(
+                {
+                    "symbol": ["SPY"] * 26,
+                    "timestamp": timestamps,
+                    "open": [100.0] * 26,
+                    "high": [101.0] * 26,
+                    "low": [99.0] * 26,
+                    "close": [100.5] * 26,
+                    "volume": [1000] * 26,
+                }
+            )
+        )
+
+    january_third = date(2024, 1, 3)
+
+    if (
+        chunk.start.date()
+        <= january_third
+        < chunk.end.date()
+    ):
+        timestamps = pd.date_range(
+            start="2024-01-03T14:30:00Z",
+            periods=26,
+            freq="15min",
+        ).delete(5)
+
+        frames.append(
+            pd.DataFrame(
+                {
+                    "symbol": ["SPY"] * 25,
+                    "timestamp": timestamps,
+                    "open": [101.0] * 25,
+                    "high": [102.0] * 25,
+                    "low": [100.0] * 25,
+                    "close": [101.5] * 25,
+                    "volume": [1100] * 25,
+                }
+            )
+        )
+
+    if not frames:
+        return pd.DataFrame()
+
+    return pd.concat(
+        frames,
+        ignore_index=True,
+    )
+
+
+def test_incomplete_session_is_strict_by_default(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        RangeCoverageError,
+        match="1 missing bars",
+    ):
+        run_range_download(
+            settings=sample_settings(),
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 3),
+            output_directory=tmp_path,
+            fetch_chunk=(
+                fake_complete_and_incomplete_sessions
+            ),
+            show_progress=False,
+        )
+
+
+def test_explicit_exclusion_is_saved_in_metadata(
+    tmp_path: Path,
+) -> None:
+    result = run_range_download(
+        settings=sample_settings(),
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 3),
+        output_directory=tmp_path,
+        exclude_incomplete_sessions=True,
+        fetch_chunk=(
+            fake_complete_and_incomplete_sessions
+        ),
+        show_progress=False,
+    )
+
+    metadata = json.loads(
+        result.paths.metadata.read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert result.audited.excluded_session_dates == (
+        date(2024, 1, 3),
+    )
+
+    assert metadata[
+        "requested_session_count"
+    ] == 2
+
+    assert metadata["session_count"] == 1
+
+    assert metadata[
+        "excluded_session_count"
+    ] == 1
+
+    assert metadata[
+        "excluded_session_dates"
+    ] == [
+        "2024-01-03"
+    ]
+
+    assert metadata[
+        "excluded_missing_bar_count"
+    ] == 1
+
+    assert metadata[
+        "requested_expected_bar_count"
+    ] == 52
+
+    assert metadata[
+        "expected_bar_count"
+    ] == 26
+
+
+def test_parser_accepts_exclusion_flag() -> None:
+    arguments = build_parser().parse_args(
+        [
+            "--start",
+            "2024-01-01",
+            "--end",
+            "2024-01-03",
+            "--exclude-incomplete-sessions",
+        ]
+    )
+
+    assert (
+        arguments.exclude_incomplete_sessions
+        is True
     )

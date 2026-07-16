@@ -166,11 +166,28 @@ def build_dataset_metadata(
         "row_count": len(
             audited_range.frame
         ),
+        "requested_session_count": (
+            audited_range.requested_session_count
+        ),
         "session_count": (
             audited_range.session_count
         ),
+        "excluded_session_count": len(
+            audited_range.excluded_session_dates
+        ),
+        "excluded_session_dates": [
+            session_date.isoformat()
+            for session_date
+            in audited_range.excluded_session_dates
+        ],
+        "excluded_missing_bar_count": (
+            audited_range.excluded_missing_bar_count
+        ),
         "expected_bar_count": (
             audited_range.expected_bar_count
+        ),
+        "requested_expected_bar_count": (
+            audited_range.requested_expected_bar_count
         ),
         "actual_bar_count": (
             audited_range.actual_bar_count
