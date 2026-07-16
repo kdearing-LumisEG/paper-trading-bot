@@ -58,3 +58,35 @@
 ### Purpose
 
 Evaluate whether the unchanged deterministic EMA crossover strategy behaves consistently outside the development period. This experiment is not evidence of live profitability because transaction costs, slippage, latency, and operational failures are not yet modeled.
+
+### Results
+
+#### Development period
+
+- Bars: 9,636
+- Trades: 188
+- Gross P&L: $17.67
+- Total return: 0.1767%
+- Maximum drawdown: 0.2858%
+- Win rate: 49.47%
+- Profit factor: 1.1002
+- Exposure: 23.38%
+
+#### Unseen evaluation period
+
+- Bars: 6,490
+- Trades: 124
+- Gross P&L: -$19.58
+- Total return: -0.1958%
+- Maximum drawdown: 0.4313%
+- Win rate: 41.94%
+- Profit factor: 0.8456
+- Exposure: 21.23%
+
+### Interpretation
+
+The strategy produced only a marginal positive result during development and failed during the unseen evaluation period. Because transaction costs and slippage were excluded, the reported performance likely overstates realistic results.
+
+The frozen 9/21 EMA strategy will be retained as a deterministic software and testing baseline, but it is not currently considered a viable paper-trading candidate.
+
+The unseen evaluation period is now classified as seen data and will not be reused as an untouched holdout period.
