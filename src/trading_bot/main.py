@@ -1,4 +1,4 @@
-"""Command-line entry point for manual Alpaca paper checks."""
+"""Command-line entry point for safe Alpaca paper trading."""
 
 from __future__ import annotations
 
@@ -9,6 +9,14 @@ from enum import Enum
 import json
 from pathlib import Path
 
+from trading_bot.backtest.risk_controls import (
+    ConsecutiveLossLimit,
+    DailyLossLimit,
+    MaxTradesPerSession,
+)
+from trading_bot.backtest.risk_manager import (
+    SessionRiskConfig,
+)
 from trading_bot.broker.alpaca_client import (
     AlpacaPaperBroker,
 )
@@ -16,7 +24,16 @@ from trading_bot.broker.models import (
     MarketOrderRequest,
     OrderSide,
 )
-from trading_bot.config import load_settings
+from trading_bot.config import (
+    Settings,
+    load_settings,
+)
+from trading_bot.execution.coordinator import (
+    SignalExecutionCoordinator,
+)
+from trading_bot.execution.decision_logging import (
+    JsonlSignalDecisionLogger,
+)
 from trading_bot.execution.kill_switch import (
     FileKillSwitch,
 )
@@ -26,24 +43,50 @@ from trading_bot.execution.logging import (
 from trading_bot.execution.models import (
     ExecutionSettings,
 )
+from trading_bot.execution.risk_state import (
+    JsonRiskStateStore,
+)
 from trading_bot.execution.service import (
     PaperExecutionService,
 )
+from trading_bot.execution.signal_models import (
+    StrategySignal,
+    StrategySignalEvent,
+)
 
 
-def _json_default(value: object) -> object:
+def _json_default(
+    value: object,
+) -> object:
     if isinstance(value, Enum):
         return value.value
-    if isinstance(value, (date, datetime)):
+
+    if isinstance(
+        value,
+        (
+            date,
+            datetime,
+        ),
+    ):
         return value.isoformat()
+
+    if isinstance(value, Path):
+        return str(value)
+
     raise TypeError(
-        f"Object of type {type(value).__name__} "
+        f"Object of type "
+        f"{type(value).__name__} "
         "is not JSON serializable."
     )
 
 
-def _print_json(value: object) -> None:
-    if hasattr(value, "__dataclass_fields__"):
+def _print_json(
+    value: object,
+) -> None:
+    if hasattr(
+        value,
+        "__dataclass_fields__",
+    ):
         value = asdict(value)
 
     print(
@@ -56,10 +99,79 @@ def _print_json(value: object) -> None:
     )
 
 
+def _parse_datetime(
+    value: str,
+) -> datetime:
+    normalized = value.strip()
+
+    if normalized.endswith("Z"):
+        normalized = (
+            normalized[:-1]
+            + "+00:00"
+        )
+
+    try:
+        result = datetime.fromisoformat(
+            normalized
+        )
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "signal time must be ISO-8601, "
+            "for example 2026-01-02T15:00:00Z"
+        ) from exc
+
+    return result
+
+
+def _add_execution_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    include_client_order_id: bool,
+) -> None:
+    if include_client_order_id:
+        parser.add_argument(
+            "--client-order-id",
+            required=True,
+            help=(
+                "Unique stable identifier used "
+                "for duplicate protection."
+            ),
+        )
+
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help=(
+            "Submit to Alpaca paper trading. "
+            "Without this flag the command "
+            "is a dry run."
+        ),
+    )
+
+    parser.add_argument(
+        "--poll-interval-seconds",
+        type=float,
+        help=(
+            "Override the configured polling interval."
+        ),
+    )
+
+    parser.add_argument(
+        "--max-poll-attempts",
+        type=int,
+        help=(
+            "Override the configured polling limit."
+        ),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
+    """Build the paper-trading command-line parser."""
+
     parser = argparse.ArgumentParser(
         description=(
-            "Inspect or submit orders to an Alpaca paper account."
+            "Inspect or safely submit orders "
+            "to an Alpaca paper account."
         )
     )
 
@@ -87,63 +199,172 @@ def build_parser() -> argparse.ArgumentParser:
         help="Show open paper positions.",
     )
 
-    for command in ("buy", "sell"):
+    subparsers.add_parser(
+        "risk-state",
+        help=(
+            "Show persisted paper-trading "
+            "session risk state."
+        ),
+    )
+
+    for command in (
+        "buy",
+        "sell",
+    ):
         order_parser = subparsers.add_parser(
             command,
             help=(
-                f"Create a {command} market-order attempt."
+                f"Create a {command} "
+                "market-order attempt."
             ),
         )
+
         order_parser.add_argument(
             "--symbol",
             help=(
-                "Stock symbol; defaults to strategy.yaml."
+                "Stock symbol; defaults "
+                "to strategy.yaml."
             ),
         )
+
         order_parser.add_argument(
             "--quantity",
             type=int,
             required=True,
         )
-        order_parser.add_argument(
-            "--client-order-id",
-            required=True,
-            help=(
-                "Unique stable identifier used for duplicate protection."
-            ),
+
+        _add_execution_arguments(
+            order_parser,
+            include_client_order_id=True,
         )
-        order_parser.add_argument(
-            "--execute",
-            action="store_true",
-            help=(
-                "Submit to Alpaca paper trading. Without this "
-                "flag the command is a dry run."
-            ),
-        )
-        order_parser.add_argument(
-            "--poll-interval-seconds",
-            type=float,
-            default=1.0,
-        )
-        order_parser.add_argument(
-            "--max-poll-attempts",
-            type=int,
-            default=10,
-        )
+
+    signal_parser = subparsers.add_parser(
+        "signal",
+        help=(
+            "Pass one deterministic strategy signal "
+            "through position, risk, and execution checks."
+        ),
+    )
+
+    signal_parser.add_argument(
+        "--signal",
+        choices=[
+            signal.value
+            for signal in StrategySignal
+        ],
+        required=True,
+    )
+
+    signal_parser.add_argument(
+        "--signal-time",
+        type=_parse_datetime,
+        required=True,
+    )
+
+    signal_parser.add_argument(
+        "--symbol",
+        help=(
+            "Stock symbol; defaults "
+            "to strategy.yaml."
+        ),
+    )
+
+    signal_parser.add_argument(
+        "--quantity",
+        type=int,
+        help=(
+            "Entry quantity; exits close "
+            "the current whole-share position."
+        ),
+    )
+
+    signal_parser.add_argument(
+        "--strategy-name",
+        help=(
+            "Strategy identifier; defaults "
+            "to strategy.yaml."
+        ),
+    )
+
+    _add_execution_arguments(
+        signal_parser,
+        include_client_order_id=False,
+    )
 
     return parser
 
 
-def main() -> None:
-    arguments = build_parser().parse_args()
-    settings = load_settings()
+def _risk_config(
+    settings: Settings,
+) -> SessionRiskConfig:
+    execution = settings.paper_execution
+
+    return SessionRiskConfig(
+        daily_loss_limit=(
+            DailyLossLimit(
+                execution.max_daily_loss
+            )
+            if execution.max_daily_loss
+            is not None
+            else None
+        ),
+        max_trades_per_session=(
+            MaxTradesPerSession(
+                execution
+                .max_trades_per_session
+            )
+            if execution
+            .max_trades_per_session
+            is not None
+            else None
+        ),
+        consecutive_loss_limit=(
+            ConsecutiveLossLimit(
+                execution
+                .max_consecutive_losses
+            )
+            if execution
+            .max_consecutive_losses
+            is not None
+            else None
+        ),
+    )
+
+
+def _execution_service(
+    settings: Settings,
+    arguments: argparse.Namespace,
+) -> PaperExecutionService:
+    execution = settings.paper_execution
+
+    poll_interval_seconds = (
+        arguments.poll_interval_seconds
+        if getattr(
+            arguments,
+            "poll_interval_seconds",
+            None,
+        )
+        is not None
+        else execution.poll_interval_seconds
+    )
+
+    max_poll_attempts = (
+        arguments.max_poll_attempts
+        if getattr(
+            arguments,
+            "max_poll_attempts",
+            None,
+        )
+        is not None
+        else execution.max_poll_attempts
+    )
 
     broker = AlpacaPaperBroker(
         api_key=settings.alpaca_api_key,
         secret_key=settings.alpaca_secret_key,
     )
 
-    service = PaperExecutionService(
+    return PaperExecutionService(
         broker=broker,
         settings=ExecutionSettings(
             dry_run=not getattr(
@@ -151,34 +372,63 @@ def main() -> None:
                 "execute",
                 False,
             ),
-            poll_interval_seconds=getattr(
-                arguments,
-                "poll_interval_seconds",
-                1.0,
+            poll_interval_seconds=(
+                poll_interval_seconds
             ),
-            max_poll_attempts=getattr(
-                arguments,
-                "max_poll_attempts",
-                10,
+            max_poll_attempts=(
+                max_poll_attempts
             ),
         ),
         kill_switch=FileKillSwitch(
             arguments.kill_switch_path
         ),
         logger=JsonlExecutionLogger(
-            Path("logs/execution/paper_orders.jsonl")
+            execution.order_log_path
         ),
     )
 
+
+def main() -> None:
+    """Run one manual paper-trading command."""
+
+    arguments = (
+        build_parser().parse_args()
+    )
+
+    settings = load_settings()
+    execution = settings.paper_execution
+
+    risk_store = JsonRiskStateStore(
+        execution.risk_state_path
+    )
+
+    risk_manager = risk_store.load(
+        _risk_config(settings)
+    )
+
+    if arguments.command == "risk-state":
+        _print_json(
+            risk_manager.export_state()
+        )
+        return
+
+    service = _execution_service(
+        settings=settings,
+        arguments=arguments,
+    )
+
     if arguments.command == "account":
-        _print_json(service.get_account())
+        _print_json(
+            service.get_account()
+        )
         return
 
     if arguments.command == "positions":
         _print_json(
             [
                 asdict(position)
-                for position in service.list_positions()
+                for position
+                in service.list_positions()
             ]
         )
         return
@@ -188,6 +438,48 @@ def main() -> None:
         if arguments.symbol is not None
         else settings.symbol
     )
+
+    if arguments.command == "signal":
+        coordinator = (
+            SignalExecutionCoordinator(
+                execution_service=service,
+                risk_manager=risk_manager,
+                risk_state_store=risk_store,
+                logger=(
+                    JsonlSignalDecisionLogger(
+                        execution
+                        .decision_log_path
+                    )
+                ),
+            )
+        )
+
+        event = StrategySignalEvent(
+            strategy_name=(
+                arguments.strategy_name
+                if arguments.strategy_name
+                is not None
+                else settings.strategy.name
+            ),
+            symbol=symbol,
+            signal=StrategySignal(
+                arguments.signal
+            ),
+            signal_time=(
+                arguments.signal_time
+            ),
+            entry_quantity=(
+                arguments.quantity
+                if arguments.quantity
+                is not None
+                else execution.quantity
+            ),
+        )
+
+        _print_json(
+            coordinator.handle(event)
+        )
+        return
 
     side = (
         OrderSide.BUY
@@ -204,10 +496,11 @@ def main() -> None:
         ),
     )
 
-    result = service.execute_market_order(
-        request
+    _print_json(
+        service.execute_market_order(
+            request
+        )
     )
-    _print_json(result)
 
 
 if __name__ == "__main__":

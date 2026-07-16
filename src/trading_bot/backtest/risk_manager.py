@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+import math
 from typing import Mapping
 
 import pandas as pd
@@ -89,22 +90,30 @@ class RiskManager:
             if config is not None
             else SessionRiskConfig()
         )
-        self._states: dict[date, _SessionRiskState] = {}
+        self._states: dict[
+            date,
+            _SessionRiskState,
+        ] = {}
 
     @staticmethod
     def _session_date(
         session: date | datetime | pd.Timestamp,
     ) -> date:
-        if isinstance(session, date) and not isinstance(
-            session,
-            datetime,
+        if (
+            isinstance(session, date)
+            and not isinstance(
+                session,
+                datetime,
+            )
         ):
             return session
 
         timestamp = pd.Timestamp(session)
 
         if timestamp.tzinfo is None:
-            timestamp = timestamp.tz_localize("UTC")
+            timestamp = timestamp.tz_localize(
+                "UTC"
+            )
 
         return timestamp.tz_convert(
             "America/New_York"
@@ -114,11 +123,15 @@ class RiskManager:
         self,
         session: date | datetime | pd.Timestamp,
     ) -> tuple[date, _SessionRiskState]:
-        session_date = self._session_date(session)
+        session_date = self._session_date(
+            session
+        )
+
         state = self._states.setdefault(
             session_date,
             _SessionRiskState(),
         )
+
         return session_date, state
 
     def snapshot(
@@ -127,13 +140,19 @@ class RiskManager:
     ) -> SessionRiskSnapshot:
         """Return current state for one session."""
 
-        session_date, state = self._state_for(session)
+        session_date, state = self._state_for(
+            session
+        )
 
         return SessionRiskSnapshot(
             session_date=session_date,
-            realized_net_pnl=state.realized_net_pnl,
+            realized_net_pnl=(
+                state.realized_net_pnl
+            ),
             trades_started=state.trades_started,
-            consecutive_losses=state.consecutive_losses,
+            consecutive_losses=(
+                state.consecutive_losses
+            ),
         )
 
     def evaluate_entry(
@@ -144,7 +163,10 @@ class RiskManager:
 
         snapshot = self.snapshot(session)
 
-        daily_loss = self._config.daily_loss_limit
+        daily_loss = (
+            self._config.daily_loss_limit
+        )
+
         if (
             daily_loss is not None
             and not daily_loss.entry_allowed(
@@ -157,7 +179,11 @@ class RiskManager:
                 snapshot=snapshot,
             )
 
-        max_trades = self._config.max_trades_per_session
+        max_trades = (
+            self._config
+            .max_trades_per_session
+        )
+
         if (
             max_trades is not None
             and not max_trades.entry_allowed(
@@ -171,8 +197,10 @@ class RiskManager:
             )
 
         consecutive_losses = (
-            self._config.consecutive_loss_limit
+            self._config
+            .consecutive_loss_limit
         )
+
         if (
             consecutive_losses is not None
             and not consecutive_losses.entry_allowed(
@@ -181,7 +209,9 @@ class RiskManager:
         ):
             return RiskDecision(
                 allowed=False,
-                reason=CONSECUTIVE_LOSSES_REASON,
+                reason=(
+                    CONSECUTIVE_LOSSES_REASON
+                ),
                 snapshot=snapshot,
             )
 
@@ -200,12 +230,19 @@ class RiskManager:
         _, state = self._state_for(session)
         state.trades_started += 1
 
-    def record_trade(self, trade: Trade) -> None:
-        """Record realized net P&L and update the loss streak."""
+    def record_realized_pnl(
+        self,
+        session: date | datetime | pd.Timestamp,
+        net_pnl: float,
+    ) -> None:
+        """Record realized net P&L without requiring a backtest Trade."""
 
-        _, state = self._state_for(trade.exit_time)
-        net_pnl = trade.resolved_net_pnl
+        if not math.isfinite(net_pnl):
+            raise ValueError(
+                "net_pnl must be finite."
+            )
 
+        _, state = self._state_for(session)
         state.realized_net_pnl += net_pnl
 
         if net_pnl < 0:
@@ -213,20 +250,178 @@ class RiskManager:
         else:
             state.consecutive_losses = 0
 
+    def record_trade(
+        self,
+        trade: Trade,
+    ) -> None:
+        """Record a completed backtest trade."""
+
+        self.record_realized_pnl(
+            session=trade.exit_time,
+            net_pnl=trade.resolved_net_pnl,
+        )
+
     def settings(self) -> dict[str, object]:
         """Return configured controls for reports."""
 
         return self._config.to_dict()
 
-    def snapshots(self) -> Mapping[date, SessionRiskSnapshot]:
+    def snapshots(
+        self,
+    ) -> Mapping[
+        date,
+        SessionRiskSnapshot,
+    ]:
         """Return snapshots for all sessions observed so far."""
 
         return {
-            session_date: SessionRiskSnapshot(
-                session_date=session_date,
-                realized_net_pnl=state.realized_net_pnl,
-                trades_started=state.trades_started,
-                consecutive_losses=state.consecutive_losses,
+            session_date: (
+                SessionRiskSnapshot(
+                    session_date=session_date,
+                    realized_net_pnl=(
+                        state.realized_net_pnl
+                    ),
+                    trades_started=(
+                        state.trades_started
+                    ),
+                    consecutive_losses=(
+                        state.consecutive_losses
+                    ),
+                )
             )
-            for session_date, state in self._states.items()
+            for session_date, state
+            in self._states.items()
         }
+
+    def export_state(
+        self,
+    ) -> dict[str, object]:
+        """Return JSON-serializable session state."""
+
+        return {
+            "version": 1,
+            "sessions": {
+                session_date.isoformat(): {
+                    "realized_net_pnl": (
+                        state.realized_net_pnl
+                    ),
+                    "trades_started": (
+                        state.trades_started
+                    ),
+                    "consecutive_losses": (
+                        state.consecutive_losses
+                    ),
+                }
+                for session_date, state
+                in sorted(
+                    self._states.items()
+                )
+            },
+        }
+
+    @classmethod
+    def from_state(
+        cls,
+        config: SessionRiskConfig | None,
+        payload: Mapping[str, object],
+    ) -> "RiskManager":
+        """Restore a manager from validated serialized state."""
+
+        if payload.get("version") != 1:
+            raise ValueError(
+                "Unsupported risk-state version."
+            )
+
+        sessions = payload.get(
+            "sessions",
+            {},
+        )
+
+        if not isinstance(
+            sessions,
+            Mapping,
+        ):
+            raise ValueError(
+                "Risk-state sessions must be a mapping."
+            )
+
+        manager = cls(config)
+
+        for session_text, raw_state in sessions.items():
+            if not isinstance(
+                session_text,
+                str,
+            ):
+                raise ValueError(
+                    "Risk-state session keys must be dates."
+                )
+
+            if not isinstance(
+                raw_state,
+                Mapping,
+            ):
+                raise ValueError(
+                    "Risk-state session values must be mappings."
+                )
+
+            try:
+                session_date = date.fromisoformat(
+                    session_text
+                )
+
+                realized_net_pnl = float(
+                    raw_state[
+                        "realized_net_pnl"
+                    ]
+                )
+
+                trades_started = int(
+                    raw_state[
+                        "trades_started"
+                    ]
+                )
+
+                consecutive_losses = int(
+                    raw_state[
+                        "consecutive_losses"
+                    ]
+                )
+            except (
+                KeyError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                raise ValueError(
+                    "Risk-state session data is invalid."
+                ) from exc
+
+            if not math.isfinite(
+                realized_net_pnl
+            ):
+                raise ValueError(
+                    "Risk-state P&L must be finite."
+                )
+
+            if (
+                trades_started < 0
+                or consecutive_losses < 0
+            ):
+                raise ValueError(
+                    "Risk-state counters cannot be negative."
+                )
+
+            manager._states[
+                session_date
+            ] = _SessionRiskState(
+                realized_net_pnl=(
+                    realized_net_pnl
+                ),
+                trades_started=(
+                    trades_started
+                ),
+                consecutive_losses=(
+                    consecutive_losses
+                ),
+            )
+
+        return manager

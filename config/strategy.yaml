@@ -3,5 +3,20 @@ timeframe_minutes: 15
 data_feed: iex
 
 strategy:
+  name: ema_crossover_9_21
   fast_ema: 9
   slow_ema: 21
+
+paper_execution:
+  quantity: 1
+  poll_interval_seconds: 1.0
+  max_poll_attempts: 10
+
+  # Educational paper-trading guardrails. Tune only after testing.
+  max_daily_loss: 25.0
+  max_trades_per_session: 3
+  max_consecutive_losses: 2
+
+  order_log_path: logs/execution/paper_orders.jsonl
+  decision_log_path: logs/execution/signal_decisions.jsonl
+  risk_state_path: logs/execution/session_risk_state.json
