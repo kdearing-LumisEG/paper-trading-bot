@@ -53,6 +53,22 @@ class MarketSignalSettings:
 
 
 @dataclass(frozen=True)
+class ReconciliationSettings:
+    """Operational state-reconciliation and runtime-lock settings."""
+
+    position_state_path: Path = Path(
+        "logs/execution/position_state.json"
+    )
+    report_log_path: Path = Path(
+        "logs/execution/reconciliation.jsonl"
+    )
+    process_lock_path: Path = Path(
+        "logs/execution/runtime.lock"
+    )
+    average_price_tolerance: float = 0.01
+
+
+@dataclass(frozen=True)
 class Settings:
     """Validated settings used throughout the application."""
 
@@ -67,6 +83,9 @@ class Settings:
     )
     market_signal: MarketSignalSettings = field(
         default_factory=MarketSignalSettings
+    )
+    reconciliation: ReconciliationSettings = field(
+        default_factory=ReconciliationSettings
     )
 
 
@@ -465,6 +484,74 @@ def load_settings(
             ),
         )
 
+        reconciliation_config = config.get(
+            "reconciliation",
+            {},
+        )
+
+        if not isinstance(
+            reconciliation_config,
+            dict,
+        ):
+            raise TypeError(
+                "reconciliation must be a mapping."
+            )
+
+        position_state_path = _path_setting(
+            reconciliation_config.get(
+                "position_state_path",
+                (
+                    "logs/execution/"
+                    "position_state.json"
+                ),
+            ),
+            (
+                "reconciliation."
+                "position_state_path"
+            ),
+        )
+
+        report_log_path = _path_setting(
+            reconciliation_config.get(
+                "report_log_path",
+                (
+                    "logs/execution/"
+                    "reconciliation.jsonl"
+                ),
+            ),
+            (
+                "reconciliation."
+                "report_log_path"
+            ),
+        )
+
+        process_lock_path = _path_setting(
+            reconciliation_config.get(
+                "process_lock_path",
+                (
+                    "logs/execution/"
+                    "runtime.lock"
+                ),
+            ),
+            (
+                "reconciliation."
+                "process_lock_path"
+            ),
+        )
+
+        average_price_tolerance = (
+            _nonnegative_float(
+                reconciliation_config.get(
+                    "average_price_tolerance",
+                    0.01,
+                ),
+                (
+                    "reconciliation."
+                    "average_price_tolerance"
+                ),
+            )
+        )
+
     except (
         KeyError,
         TypeError,
@@ -564,6 +651,20 @@ def load_settings(
             ),
             signal_state_path=(
                 signal_state_path
+            ),
+        ),
+        reconciliation=ReconciliationSettings(
+            position_state_path=(
+                position_state_path
+            ),
+            report_log_path=(
+                report_log_path
+            ),
+            process_lock_path=(
+                process_lock_path
+            ),
+            average_price_tolerance=(
+                average_price_tolerance
             ),
         ),
     )

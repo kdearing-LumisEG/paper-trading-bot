@@ -23,6 +23,11 @@ from trading_bot.execution.decision_logging import (
 from trading_bot.execution.models import (
     ExecutionOutcome,
 )
+from trading_bot.execution.position_state import (
+    NullPositionStateStore,
+    PositionStateStore,
+    TrackedPosition,
+)
 from trading_bot.execution.risk_state import (
     NullRiskStateStore,
     RiskStateStore,
@@ -57,6 +62,7 @@ class SignalExecutionCoordinator:
         execution_service: PaperExecutionService,
         risk_manager: RiskManager,
         risk_state_store: RiskStateStore | None = None,
+        position_state_store: PositionStateStore | None = None,
         logger: SignalDecisionLogger | None = None,
     ) -> None:
         self._execution_service = (
@@ -67,6 +73,11 @@ class SignalExecutionCoordinator:
             risk_state_store
             if risk_state_store is not None
             else NullRiskStateStore()
+        )
+        self._position_state_store = (
+            position_state_store
+            if position_state_store is not None
+            else NullPositionStateStore()
         )
         self._logger = (
             logger
@@ -190,6 +201,18 @@ class SignalExecutionCoordinator:
         ):
             return None
 
+        filled_quantity = (
+            order.filled_quantity
+            if order.filled_quantity > 0
+            else float(request.quantity)
+        )
+
+        state_time = (
+            order.submitted_at
+            if order.submitted_at is not None
+            else event.signal_time
+        )
+
         if request.side is OrderSide.BUY:
             self._risk_manager.record_entry(
                 event.signal_time
@@ -197,6 +220,30 @@ class SignalExecutionCoordinator:
             self._risk_state_store.save(
                 self._risk_manager
             )
+
+            if (
+                order.filled_average_price
+                is not None
+                and filled_quantity > 0
+            ):
+                self._position_state_store.save(
+                    TrackedPosition(
+                        symbol=event.symbol,
+                        quantity=filled_quantity,
+                        average_entry_price=(
+                            order
+                            .filled_average_price
+                        ),
+                        updated_at=state_time,
+                        source_order_id=(
+                            order.order_id
+                        ),
+                        source_client_order_id=(
+                            order.client_order_id
+                        ),
+                    )
+                )
+
             return None
 
         if position is None:
@@ -204,12 +251,6 @@ class SignalExecutionCoordinator:
 
         if order.filled_average_price is None:
             return None
-
-        filled_quantity = (
-            order.filled_quantity
-            if order.filled_quantity > 0
-            else float(request.quantity)
-        )
 
         realized_net_pnl = (
             order.filled_average_price
@@ -223,6 +264,19 @@ class SignalExecutionCoordinator:
 
         self._risk_state_store.save(
             self._risk_manager
+        )
+
+        self._position_state_store.save(
+            TrackedPosition.flat(
+                symbol=event.symbol,
+                updated_at=state_time,
+                source_order_id=(
+                    order.order_id
+                ),
+                source_client_order_id=(
+                    order.client_order_id
+                ),
+            )
         )
 
         return realized_net_pnl

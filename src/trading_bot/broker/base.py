@@ -46,6 +46,11 @@ class PaperBroker(Protocol):
     def get_clock(self) -> MarketClockSnapshot:
         """Return the current regular-market clock."""
 
+    def list_open_orders(
+        self,
+    ) -> list[BrokerOrder]:
+        """Return all currently open paper orders."""
+
     def list_positions(
         self,
     ) -> list[PositionSnapshot]:

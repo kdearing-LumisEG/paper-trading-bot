@@ -22,6 +22,11 @@ from trading_bot.execution.models import (
     ExecutionResult,
     ExecutionSettings,
 )
+from trading_bot.execution.position_state import (
+    JsonPositionStateStore,
+    NullPositionStateStore,
+    TrackedPosition,
+)
 from trading_bot.execution.risk_state import (
     JsonRiskStateStore,
     NullRiskStateStore,
@@ -41,9 +46,11 @@ __all__ = [
     "ExecutionResult",
     "ExecutionSettings",
     "FileKillSwitch",
+    "JsonPositionStateStore",
     "JsonRiskStateStore",
     "JsonlExecutionLogger",
     "JsonlSignalDecisionLogger",
+    "NullPositionStateStore",
     "NullRiskStateStore",
     "NullSignalDecisionLogger",
     "PaperExecutionService",
@@ -53,5 +60,6 @@ __all__ = [
     "StaticKillSwitch",
     "StrategySignal",
     "StrategySignalEvent",
+    "TrackedPosition",
     "build_signal_client_order_id",
 ]

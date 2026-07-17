@@ -213,6 +213,13 @@ class PaperExecutionService:
 
         return self._broker.get_clock()
 
+    def list_open_orders(
+        self,
+    ) -> list[BrokerOrder]:
+        """Return all currently open paper orders."""
+
+        return self._broker.list_open_orders()
+
     def list_positions(
         self,
     ) -> list[PositionSnapshot]:

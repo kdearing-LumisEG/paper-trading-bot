@@ -43,6 +43,9 @@ from trading_bot.execution.logging import (
 from trading_bot.execution.models import (
     ExecutionSettings,
 )
+from trading_bot.execution.position_state import (
+    JsonPositionStateStore,
+)
 from trading_bot.execution.risk_state import (
     JsonRiskStateStore,
 )
@@ -59,6 +62,15 @@ from trading_bot.runtime.cycle import (
 )
 from trading_bot.runtime.market_data import (
     AlpacaRecentBarSource,
+)
+from trading_bot.runtime.process_lock import (
+    FileProcessLock,
+    ProcessLockError,
+)
+from trading_bot.runtime.reconciliation import (
+    JsonlReconciliationLogger,
+    ReconciliationReport,
+    ReconciliationService,
 )
 from trading_bot.runtime.signal_state import (
     JsonSignalStateStore,
@@ -214,6 +226,46 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Show persisted paper-trading "
             "session risk state."
+        ),
+    )
+
+    reconcile_parser = subparsers.add_parser(
+        "reconcile",
+        help=(
+            "Compare Alpaca positions and open orders "
+            "with local strategy-owned state."
+        ),
+    )
+
+    reconcile_parser.add_argument(
+        "--adopt-position",
+        action="store_true",
+        help=(
+            "Explicitly adopt a safe whole-share broker "
+            "position into local strategy state."
+        ),
+    )
+
+    subparsers.add_parser(
+        "lock-status",
+        help=(
+            "Show whether the signal runtime lock exists."
+        ),
+    )
+
+    clear_lock_parser = subparsers.add_parser(
+        "clear-lock",
+        help=(
+            "Explicitly clear a stale runtime lock."
+        ),
+    )
+
+    clear_lock_parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help=(
+            "Required acknowledgement before removing "
+            "the runtime lock."
         ),
     )
 
@@ -426,6 +478,7 @@ def _signal_coordinator(
     service: PaperExecutionService,
     risk_manager,
     risk_store: JsonRiskStateStore,
+    position_store: JsonPositionStateStore,
 ) -> SignalExecutionCoordinator:
     execution = settings.paper_execution
 
@@ -433,10 +486,45 @@ def _signal_coordinator(
         execution_service=service,
         risk_manager=risk_manager,
         risk_state_store=risk_store,
+        position_state_store=(
+            position_store
+        ),
         logger=JsonlSignalDecisionLogger(
             execution.decision_log_path
         ),
     )
+
+
+def _reconciliation_service(
+    *,
+    settings: Settings,
+    service: PaperExecutionService,
+    position_store: JsonPositionStateStore,
+) -> ReconciliationService:
+    reconciliation = settings.reconciliation
+
+    return ReconciliationService(
+        execution_service=service,
+        position_state_store=position_store,
+        symbol=settings.symbol,
+        average_price_tolerance=(
+            reconciliation
+            .average_price_tolerance
+        ),
+        logger=JsonlReconciliationLogger(
+            reconciliation.report_log_path
+        ),
+    )
+
+
+def _reconciliation_blocked_payload(
+    report: ReconciliationReport,
+) -> dict[str, object]:
+    return {
+        "outcome": "blocked",
+        "reason": "reconciliation_failed",
+        "reconciliation": asdict(report),
+    }
 
 
 def main() -> None:
@@ -448,6 +536,44 @@ def main() -> None:
 
     settings = load_settings()
     execution = settings.paper_execution
+    reconciliation_settings = (
+        settings.reconciliation
+    )
+
+    runtime_lock = FileProcessLock(
+        reconciliation_settings
+        .process_lock_path
+    )
+
+    if arguments.command == "lock-status":
+        _print_json(
+            runtime_lock.status()
+        )
+        return
+
+    if arguments.command == "clear-lock":
+        if not arguments.confirm:
+            _print_json(
+                {
+                    "outcome": "blocked",
+                    "reason": (
+                        "clear_lock_requires_confirm"
+                    ),
+                    "lock": runtime_lock.status(),
+                }
+            )
+            return
+
+        removed = runtime_lock.clear()
+
+        _print_json(
+            {
+                "outcome": "cleared",
+                "removed": removed,
+                "lock": runtime_lock.status(),
+            }
+        )
+        return
 
     risk_store = JsonRiskStateStore(
         execution.risk_state_path
@@ -484,131 +610,216 @@ def main() -> None:
         )
         return
 
-    if arguments.command == "run-once":
-        coordinator = _signal_coordinator(
-            settings=settings,
-            service=service,
-            risk_manager=risk_manager,
-            risk_store=risk_store,
-        )
+    position_store = JsonPositionStateStore(
+        reconciliation_settings
+        .position_state_path
+    )
 
-        market_settings = (
-            settings.market_signal
-        )
+    reconciler = _reconciliation_service(
+        settings=settings,
+        service=service,
+        position_store=position_store,
+    )
 
-        cycle = MarketSignalCycle(
-            bar_source=AlpacaRecentBarSource(
-                api_key=settings.alpaca_api_key,
-                secret_key=(
-                    settings.alpaca_secret_key
-                ),
-            ),
-            clock_source=service,
-            signal_handler=coordinator,
-            settings=MarketSignalCycleSettings(
-                strategy_name=(
-                    settings.strategy.name
-                ),
-                symbol=settings.symbol,
-                timeframe_minutes=(
-                    settings.timeframe_minutes
-                ),
-                fast_ema=(
-                    settings.strategy.fast_ema
-                ),
-                slow_ema=(
-                    settings.strategy.slow_ema
-                ),
-                entry_quantity=(
-                    execution.quantity
-                ),
-                data_feed=settings.data_feed,
-                lookback_calendar_days=(
-                    market_settings
-                    .lookback_calendar_days
-                ),
-                bar_staleness_grace_seconds=(
-                    market_settings
-                    .bar_staleness_grace_seconds
-                ),
-                flatten_minutes_before_close=(
-                    market_settings
-                    .flatten_minutes_before_close
-                ),
-            ),
-            signal_state_store=JsonSignalStateStore(
-                market_settings.signal_state_path
-            ),
-        )
+    try:
+        with runtime_lock:
+            if arguments.command == "reconcile":
+                _print_json(
+                    reconciler.run(
+                        adopt_position=(
+                            arguments
+                            .adopt_position
+                        )
+                    )
+                )
+                return
 
-        _print_json(
-            cycle.run(
-                force=arguments.force
+            reconciliation_report = (
+                reconciler.run()
             )
-        )
-        return
 
-    symbol = (
-        arguments.symbol
-        if arguments.symbol is not None
-        else settings.symbol
-    )
+            if not reconciliation_report.safe:
+                _print_json(
+                    _reconciliation_blocked_payload(
+                        reconciliation_report
+                    )
+                )
+                return
 
-    if arguments.command == "signal":
-        coordinator = _signal_coordinator(
-            settings=settings,
-            service=service,
-            risk_manager=risk_manager,
-            risk_store=risk_store,
-        )
+            if arguments.command == "run-once":
+                coordinator = (
+                    _signal_coordinator(
+                        settings=settings,
+                        service=service,
+                        risk_manager=(
+                            risk_manager
+                        ),
+                        risk_store=risk_store,
+                        position_store=(
+                            position_store
+                        ),
+                    )
+                )
 
-        event = StrategySignalEvent(
-            strategy_name=(
-                arguments.strategy_name
-                if arguments.strategy_name
-                is not None
-                else settings.strategy.name
-            ),
-            symbol=symbol,
-            signal=StrategySignal(
-                arguments.signal
-            ),
-            signal_time=(
-                arguments.signal_time
-            ),
-            entry_quantity=(
-                arguments.quantity
-                if arguments.quantity
-                is not None
-                else execution.quantity
-            ),
-        )
+                market_settings = (
+                    settings.market_signal
+                )
 
+                cycle = MarketSignalCycle(
+                    bar_source=(
+                        AlpacaRecentBarSource(
+                            api_key=(
+                                settings
+                                .alpaca_api_key
+                            ),
+                            secret_key=(
+                                settings
+                                .alpaca_secret_key
+                            ),
+                        )
+                    ),
+                    clock_source=service,
+                    signal_handler=coordinator,
+                    settings=(
+                        MarketSignalCycleSettings(
+                            strategy_name=(
+                                settings
+                                .strategy.name
+                            ),
+                            symbol=(
+                                settings.symbol
+                            ),
+                            timeframe_minutes=(
+                                settings
+                                .timeframe_minutes
+                            ),
+                            fast_ema=(
+                                settings
+                                .strategy.fast_ema
+                            ),
+                            slow_ema=(
+                                settings
+                                .strategy.slow_ema
+                            ),
+                            entry_quantity=(
+                                execution.quantity
+                            ),
+                            data_feed=(
+                                settings.data_feed
+                            ),
+                            lookback_calendar_days=(
+                                market_settings
+                                .lookback_calendar_days
+                            ),
+                            bar_staleness_grace_seconds=(
+                                market_settings
+                                .bar_staleness_grace_seconds
+                            ),
+                            flatten_minutes_before_close=(
+                                market_settings
+                                .flatten_minutes_before_close
+                            ),
+                        )
+                    ),
+                    signal_state_store=(
+                        JsonSignalStateStore(
+                            market_settings
+                            .signal_state_path
+                        )
+                    ),
+                )
+
+                _print_json(
+                    cycle.run(
+                        force=arguments.force
+                    )
+                )
+                return
+
+            symbol = (
+                arguments.symbol
+                if arguments.symbol is not None
+                else settings.symbol
+            )
+
+            if arguments.command == "signal":
+                coordinator = (
+                    _signal_coordinator(
+                        settings=settings,
+                        service=service,
+                        risk_manager=(
+                            risk_manager
+                        ),
+                        risk_store=risk_store,
+                        position_store=(
+                            position_store
+                        ),
+                    )
+                )
+
+                event = StrategySignalEvent(
+                    strategy_name=(
+                        arguments.strategy_name
+                        if arguments
+                        .strategy_name
+                        is not None
+                        else settings
+                        .strategy.name
+                    ),
+                    symbol=symbol,
+                    signal=StrategySignal(
+                        arguments.signal
+                    ),
+                    signal_time=(
+                        arguments.signal_time
+                    ),
+                    entry_quantity=(
+                        arguments.quantity
+                        if arguments.quantity
+                        is not None
+                        else execution.quantity
+                    ),
+                )
+
+                _print_json(
+                    coordinator.handle(
+                        event
+                    )
+                )
+                return
+
+            side = (
+                OrderSide.BUY
+                if arguments.command == "buy"
+                else OrderSide.SELL
+            )
+
+            request = MarketOrderRequest(
+                symbol=symbol,
+                quantity=arguments.quantity,
+                side=side,
+                client_order_id=(
+                    arguments.client_order_id
+                ),
+            )
+
+            _print_json(
+                service.execute_market_order(
+                    request
+                )
+            )
+            return
+
+    except ProcessLockError as exc:
         _print_json(
-            coordinator.handle(event)
+            {
+                "outcome": "blocked",
+                "reason": "runtime_lock_active",
+                "message": str(exc),
+                "lock": runtime_lock.status(),
+            }
         )
         return
-
-    side = (
-        OrderSide.BUY
-        if arguments.command == "buy"
-        else OrderSide.SELL
-    )
-
-    request = MarketOrderRequest(
-        symbol=symbol,
-        quantity=arguments.quantity,
-        side=side,
-        client_order_id=(
-            arguments.client_order_id
-        ),
-    )
-
-    _print_json(
-        service.execute_market_order(
-            request
-        )
-    )
 
 
 if __name__ == "__main__":

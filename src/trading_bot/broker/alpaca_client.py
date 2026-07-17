@@ -10,8 +10,10 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import (
     OrderSide as AlpacaOrderSide,
 )
+from alpaca.trading.enums import QueryOrderStatus
 from alpaca.trading.enums import TimeInForce
 from alpaca.trading.requests import (
+    GetOrdersRequest,
     MarketOrderRequest as AlpacaMarketOrderRequest,
 )
 
@@ -269,6 +271,21 @@ class AlpacaPaperBroker:
                 "next close",
             ),
         )
+
+    def list_open_orders(
+        self,
+    ) -> list[BrokerOrder]:
+        orders = self._client.get_orders(
+            GetOrdersRequest(
+                status=QueryOrderStatus.OPEN,
+                limit=500,
+            )
+        )
+
+        return [
+            self._to_order(order)
+            for order in orders
+        ]
 
     def list_positions(
         self,

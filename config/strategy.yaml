@@ -26,3 +26,9 @@ market_signal:
   bar_staleness_grace_seconds: 120.0
   flatten_minutes_before_close: 15
   signal_state_path: logs/execution/market_signal_state.json
+
+reconciliation:
+  position_state_path: logs/execution/position_state.json
+  report_log_path: logs/execution/reconciliation.jsonl
+  process_lock_path: logs/execution/runtime.lock
+  average_price_tolerance: 0.01
