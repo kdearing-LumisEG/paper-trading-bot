@@ -53,6 +53,16 @@ from trading_bot.execution.signal_models import (
     StrategySignal,
     StrategySignalEvent,
 )
+from trading_bot.runtime.cycle import (
+    MarketSignalCycle,
+    MarketSignalCycleSettings,
+)
+from trading_bot.runtime.market_data import (
+    AlpacaRecentBarSource,
+)
+from trading_bot.runtime.signal_state import (
+    JsonSignalStateStore,
+)
 
 
 def _json_default(
@@ -291,6 +301,28 @@ def build_parser() -> argparse.ArgumentParser:
         include_client_order_id=False,
     )
 
+    run_once_parser = subparsers.add_parser(
+        "run-once",
+        help=(
+            "Fetch recent bars, generate the latest "
+            "closed-bar signal, and handle it once."
+        ),
+    )
+
+    run_once_parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Reprocess the latest completed bar even "
+            "when it is already recorded."
+        ),
+    )
+
+    _add_execution_arguments(
+        run_once_parser,
+        include_client_order_id=False,
+    )
+
     return parser
 
 
@@ -388,6 +420,25 @@ def _execution_service(
     )
 
 
+def _signal_coordinator(
+    *,
+    settings: Settings,
+    service: PaperExecutionService,
+    risk_manager,
+    risk_store: JsonRiskStateStore,
+) -> SignalExecutionCoordinator:
+    execution = settings.paper_execution
+
+    return SignalExecutionCoordinator(
+        execution_service=service,
+        risk_manager=risk_manager,
+        risk_state_store=risk_store,
+        logger=JsonlSignalDecisionLogger(
+            execution.decision_log_path
+        ),
+    )
+
+
 def main() -> None:
     """Run one manual paper-trading command."""
 
@@ -433,6 +484,70 @@ def main() -> None:
         )
         return
 
+    if arguments.command == "run-once":
+        coordinator = _signal_coordinator(
+            settings=settings,
+            service=service,
+            risk_manager=risk_manager,
+            risk_store=risk_store,
+        )
+
+        market_settings = (
+            settings.market_signal
+        )
+
+        cycle = MarketSignalCycle(
+            bar_source=AlpacaRecentBarSource(
+                api_key=settings.alpaca_api_key,
+                secret_key=(
+                    settings.alpaca_secret_key
+                ),
+            ),
+            clock_source=service,
+            signal_handler=coordinator,
+            settings=MarketSignalCycleSettings(
+                strategy_name=(
+                    settings.strategy.name
+                ),
+                symbol=settings.symbol,
+                timeframe_minutes=(
+                    settings.timeframe_minutes
+                ),
+                fast_ema=(
+                    settings.strategy.fast_ema
+                ),
+                slow_ema=(
+                    settings.strategy.slow_ema
+                ),
+                entry_quantity=(
+                    execution.quantity
+                ),
+                data_feed=settings.data_feed,
+                lookback_calendar_days=(
+                    market_settings
+                    .lookback_calendar_days
+                ),
+                bar_staleness_grace_seconds=(
+                    market_settings
+                    .bar_staleness_grace_seconds
+                ),
+                flatten_minutes_before_close=(
+                    market_settings
+                    .flatten_minutes_before_close
+                ),
+            ),
+            signal_state_store=JsonSignalStateStore(
+                market_settings.signal_state_path
+            ),
+        )
+
+        _print_json(
+            cycle.run(
+                force=arguments.force
+            )
+        )
+        return
+
     symbol = (
         arguments.symbol
         if arguments.symbol is not None
@@ -440,18 +555,11 @@ def main() -> None:
     )
 
     if arguments.command == "signal":
-        coordinator = (
-            SignalExecutionCoordinator(
-                execution_service=service,
-                risk_manager=risk_manager,
-                risk_state_store=risk_store,
-                logger=(
-                    JsonlSignalDecisionLogger(
-                        execution
-                        .decision_log_path
-                    )
-                ),
-            )
+        coordinator = _signal_coordinator(
+            settings=settings,
+            service=service,
+            risk_manager=risk_manager,
+            risk_store=risk_store,
         )
 
         event = StrategySignalEvent(

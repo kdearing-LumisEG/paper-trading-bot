@@ -7,6 +7,7 @@ from typing import Protocol
 from trading_bot.broker.models import (
     AccountSnapshot,
     BrokerOrder,
+    MarketClockSnapshot,
     MarketOrderRequest,
     PositionSnapshot,
 )
@@ -41,6 +42,9 @@ class PaperBroker(Protocol):
 
     def get_account(self) -> AccountSnapshot:
         """Return the current paper-account state."""
+
+    def get_clock(self) -> MarketClockSnapshot:
+        """Return the current regular-market clock."""
 
     def list_positions(
         self,

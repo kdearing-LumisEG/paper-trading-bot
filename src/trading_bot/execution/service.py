@@ -10,6 +10,7 @@ from trading_bot.broker.models import (
     AccountSnapshot,
     BrokerOrder,
     BrokerOrderStatus,
+    MarketClockSnapshot,
     MarketOrderRequest,
     PositionSnapshot,
 )
@@ -206,6 +207,11 @@ class PaperExecutionService:
         """Return the latest paper-account snapshot."""
 
         return self._broker.get_account()
+
+    def get_clock(self) -> MarketClockSnapshot:
+        """Return the latest regular-market clock."""
+
+        return self._broker.get_clock()
 
     def list_positions(
         self,

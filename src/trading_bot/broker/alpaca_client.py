@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from alpaca.common.exceptions import APIError
@@ -18,6 +19,7 @@ from trading_bot.broker.models import (
     AccountSnapshot,
     BrokerOrder,
     BrokerOrderStatus,
+    MarketClockSnapshot,
     MarketOrderRequest,
     OrderSide,
     PositionSnapshot,
@@ -48,6 +50,26 @@ def _required_float(
             f"Alpaca response is missing {field_name}."
         )
     return float(value)
+
+
+
+def _required_datetime(
+    value: object,
+    field_name: str,
+) -> datetime:
+    if not isinstance(value, datetime):
+        raise AlpacaBrokerError(
+            f"Alpaca response is missing {field_name}."
+        )
+
+    if value.tzinfo is None:
+        return value.replace(
+            tzinfo=timezone.utc
+        )
+
+    return value.astimezone(
+        timezone.utc
+    )
 
 
 def _normalized_status(
@@ -225,6 +247,26 @@ class AlpacaPaperBroker:
             ),
             account_blocked=bool(
                 account.account_blocked
+            ),
+        )
+
+
+    def get_clock(self) -> MarketClockSnapshot:
+        clock = self._client.get_clock()
+
+        return MarketClockSnapshot(
+            timestamp=_required_datetime(
+                clock.timestamp,
+                "clock timestamp",
+            ),
+            is_open=bool(clock.is_open),
+            next_open=_required_datetime(
+                clock.next_open,
+                "next open",
+            ),
+            next_close=_required_datetime(
+                clock.next_close,
+                "next close",
             ),
         )
 

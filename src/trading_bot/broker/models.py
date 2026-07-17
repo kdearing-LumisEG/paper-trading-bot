@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 import math
 import re
@@ -181,6 +181,49 @@ class AccountSnapshot:
     equity: float
     trading_blocked: bool
     account_blocked: bool
+
+
+@dataclass(frozen=True)
+class MarketClockSnapshot:
+    """Normalized current regular-market clock state."""
+
+    timestamp: datetime
+    is_open: bool
+    next_open: datetime
+    next_close: datetime
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "timestamp",
+            "next_open",
+            "next_close",
+        ):
+            value = getattr(self, field_name)
+
+            if value.tzinfo is None:
+                value = value.replace(
+                    tzinfo=timezone.utc
+                )
+            else:
+                value = value.astimezone(
+                    timezone.utc
+                )
+
+            object.__setattr__(
+                self,
+                field_name,
+                value,
+            )
+
+        if self.next_open <= self.timestamp and not self.is_open:
+            raise BrokerModelError(
+                "next_open must be after timestamp when the market is closed."
+            )
+
+        if self.is_open and self.next_close <= self.timestamp:
+            raise BrokerModelError(
+                "next_close must be after timestamp when the market is open."
+            )
 
 
 @dataclass(frozen=True)

@@ -1,4 +1,4 @@
-﻿"""Application configuration loading and validation."""
+"""Application configuration loading and validation."""
 
 from dataclasses import dataclass, field
 import math
@@ -41,6 +41,18 @@ class PaperExecutionSettings:
 
 
 @dataclass(frozen=True)
+class MarketSignalSettings:
+    """Settings for one-shot market-data signal evaluation."""
+
+    lookback_calendar_days: int = 14
+    bar_staleness_grace_seconds: float = 120.0
+    flatten_minutes_before_close: int = 15
+    signal_state_path: Path = Path(
+        "logs/execution/market_signal_state.json"
+    )
+
+
+@dataclass(frozen=True)
 class Settings:
     """Validated settings used throughout the application."""
 
@@ -53,6 +65,10 @@ class Settings:
     paper_execution: PaperExecutionSettings = field(
         default_factory=PaperExecutionSettings
     )
+    market_signal: MarketSignalSettings = field(
+        default_factory=MarketSignalSettings
+    )
+
 
 def _read_yaml(path: Path) -> dict[str, Any]:
     """Read and validate a YAML configuration file."""
@@ -159,6 +175,25 @@ def _positive_float(
     return result
 
 
+def _nonnegative_float(
+    value: object,
+    field_name: str,
+) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"{field_name} must be a finite nonnegative number."
+        ) from exc
+
+    if not math.isfinite(result) or result < 0:
+        raise ValueError(
+            f"{field_name} must be a finite nonnegative number."
+        )
+
+    return result
+
+
 def _path_setting(
     value: object,
     field_name: str,
@@ -220,6 +255,15 @@ def load_settings(
         ).strip().lower()
 
         strategy_config = config["strategy"]
+
+        if not isinstance(
+            strategy_config,
+            dict,
+        ):
+            raise TypeError(
+                "strategy must be a mapping."
+            )
+
         fast_ema = int(
             strategy_config["fast_ema"]
         )
@@ -357,6 +401,70 @@ def load_settings(
             ),
         )
 
+        market_config = config.get(
+            "market_signal",
+            {},
+        )
+
+        if not isinstance(
+            market_config,
+            dict,
+        ):
+            raise TypeError(
+                "market_signal must be a mapping."
+            )
+
+        lookback_calendar_days = _positive_int(
+            market_config.get(
+                "lookback_calendar_days",
+                14,
+            ),
+            (
+                "market_signal."
+                "lookback_calendar_days"
+            ),
+        )
+
+        bar_staleness_grace_seconds = (
+            _nonnegative_float(
+                market_config.get(
+                    "bar_staleness_grace_seconds",
+                    120.0,
+                ),
+                (
+                    "market_signal."
+                    "bar_staleness_grace_seconds"
+                ),
+            )
+        )
+
+        flatten_minutes_before_close = (
+            _positive_int(
+                market_config.get(
+                    "flatten_minutes_before_close",
+                    15,
+                ),
+                (
+                    "market_signal."
+                    "flatten_minutes_before_close"
+                ),
+            )
+        )
+
+        signal_state_path = _path_setting(
+            market_config.get(
+                "signal_state_path",
+                (
+                    "logs/execution/"
+                    "market_signal_state.json"
+                ),
+            ),
+            (
+                "market_signal."
+                "signal_state_path"
+            ),
+        )
+
     except (
         KeyError,
         TypeError,
@@ -444,6 +552,18 @@ def load_settings(
                 ),
             )
         ),
+        market_signal=MarketSignalSettings(
+            lookback_calendar_days=(
+                lookback_calendar_days
+            ),
+            bar_staleness_grace_seconds=(
+                bar_staleness_grace_seconds
+            ),
+            flatten_minutes_before_close=(
+                flatten_minutes_before_close
+            ),
+            signal_state_path=(
+                signal_state_path
+            ),
+        ),
     )
-
-

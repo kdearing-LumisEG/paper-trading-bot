@@ -20,3 +20,9 @@ paper_execution:
   order_log_path: logs/execution/paper_orders.jsonl
   decision_log_path: logs/execution/signal_decisions.jsonl
   risk_state_path: logs/execution/session_risk_state.json
+
+market_signal:
+  lookback_calendar_days: 14
+  bar_staleness_grace_seconds: 120.0
+  flatten_minutes_before_close: 15
+  signal_state_path: logs/execution/market_signal_state.json
