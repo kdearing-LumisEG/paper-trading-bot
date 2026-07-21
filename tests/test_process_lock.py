@@ -58,3 +58,26 @@ def test_explicit_clear_removes_lock(
     assert lock.clear() is True
     assert lock.clear() is False
     assert lock.status()["active"] is False
+
+
+def test_unreadable_lock_status_does_not_clear_file(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "runtime.lock"
+    path.write_text(
+        "not-json",
+        encoding="utf-8",
+    )
+
+    status = FileProcessLock(path).status()
+
+    assert status == {
+        "active": True,
+        "path": str(path),
+        "metadata": {
+            "unreadable": True,
+        },
+    }
+    assert path.read_text(
+        encoding="utf-8",
+    ) == "not-json"

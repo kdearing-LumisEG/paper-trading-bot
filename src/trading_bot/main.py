@@ -527,6 +527,29 @@ def _reconciliation_blocked_payload(
     }
 
 
+def _position_inspection_payload(
+    *,
+    service: PaperExecutionService,
+    position_store: JsonPositionStateStore,
+    symbol: str,
+) -> dict[str, object]:
+    tracked_position = position_store.load(
+        symbol
+    )
+
+    return {
+        "broker_positions": [
+            asdict(position)
+            for position in service.list_positions()
+        ],
+        "tracked_position": (
+            asdict(tracked_position)
+            if tracked_position is not None
+            else None
+        ),
+    }
+
+
 def main() -> None:
     """Run one manual paper-trading command."""
 
@@ -594,6 +617,11 @@ def main() -> None:
         arguments=arguments,
     )
 
+    position_store = JsonPositionStateStore(
+        reconciliation_settings
+        .position_state_path
+    )
+
     if arguments.command == "account":
         _print_json(
             service.get_account()
@@ -602,18 +630,13 @@ def main() -> None:
 
     if arguments.command == "positions":
         _print_json(
-            [
-                asdict(position)
-                for position
-                in service.list_positions()
-            ]
+            _position_inspection_payload(
+                service=service,
+                position_store=position_store,
+                symbol=settings.symbol,
+            )
         )
         return
-
-    position_store = JsonPositionStateStore(
-        reconciliation_settings
-        .position_state_path
-    )
 
     reconciler = _reconciliation_service(
         settings=settings,
