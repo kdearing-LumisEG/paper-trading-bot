@@ -11,6 +11,7 @@ from trading_bot.broker.alpaca_client import (
     AlpacaPaperBroker,
 )
 from trading_bot.broker.models import (
+    BrokerExecutionError,
     BrokerOrderStatus,
     MarketOrderRequest,
     OrderSide,
@@ -19,6 +20,10 @@ from trading_bot.broker.models import (
 
 class FakeTradingClient:
     def __init__(self) -> None:
+        self._sandbox = True
+        self._base_url = (
+            "https://paper-api.alpaca.markets"
+        )
         self.submitted_order_data = None
         self.cancelled_order_id = None
 
@@ -93,6 +98,15 @@ def make_broker(
     )
 
 
+def test_default_alpaca_client_proves_paper_environment() -> None:
+    broker = AlpacaPaperBroker(
+        api_key="paper-key",
+        secret_key="paper-secret",
+    )
+
+    assert broker.verify_paper_environment().verified
+
+
 def test_submit_market_order_uses_alpaca_request() -> None:
     client = FakeTradingClient()
     broker = make_broker(client)
@@ -138,3 +152,50 @@ def test_get_and_cancel_order_delegate_to_client() -> None:
 
     assert order.status is BrokerOrderStatus.FILLED
     assert client.cancelled_order_id == "broker-order-1"
+
+
+def test_nonpaper_and_unverifiable_clients_block_mutation() -> None:
+    live_client = FakeTradingClient()
+    live_client._sandbox = False
+    live_client._base_url = "https://api.alpaca.markets"
+    live_broker = make_broker(live_client)
+
+    with pytest.raises(
+        BrokerExecutionError,
+        match="paper endpoint",
+    ):
+        live_broker.submit_market_order(
+            MarketOrderRequest(
+                symbol="SPY",
+                quantity=1,
+                side=OrderSide.BUY,
+                client_order_id="signal-1",
+            )
+        )
+
+    unknown_client = FakeTradingClient()
+    del unknown_client._sandbox
+    del unknown_client._base_url
+    unknown_broker = make_broker(unknown_client)
+
+    assert not unknown_broker.verify_paper_environment().verified
+
+
+def test_paper_evidence_is_rechecked_at_mutation_time() -> None:
+    client = FakeTradingClient()
+    broker = make_broker(client)
+    assert broker.verify_paper_environment().verified
+
+    client._sandbox = False
+    client._base_url = "https://api.alpaca.markets"
+
+    with pytest.raises(BrokerExecutionError, match="paper endpoint"):
+        broker.submit_market_order(
+            MarketOrderRequest(
+                symbol="SPY",
+                quantity=1,
+                side=OrderSide.BUY,
+                client_order_id="signal-1",
+            )
+        )
+    assert client.submitted_order_data is None

@@ -1,5 +1,6 @@
 """Tests for signal-to-order coordination."""
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -25,7 +26,9 @@ from trading_bot.execution.coordinator import (
     ALREADY_FLAT_REASON,
     ALREADY_LONG_REASON,
     FRACTIONAL_POSITION_REASON,
+    BUYING_POWER_REASON,
     KILL_SWITCH_REASON,
+    REFERENCE_PRICE_REASON,
     SignalExecutionCoordinator,
 )
 from trading_bot.execution.decision_logging import (
@@ -34,6 +37,9 @@ from trading_bot.execution.decision_logging import (
 from trading_bot.execution.models import (
     ExecutionOutcome,
     ExecutionResult,
+)
+from trading_bot.execution.position_state import (
+    TrackedPosition,
 )
 from trading_bot.execution.signal_models import (
     SignalHandlingOutcome,
@@ -85,7 +91,9 @@ class FakeExecutionService:
     def execute_market_order(
         self,
         request: MarketOrderRequest,
+        **kwargs,
     ) -> ExecutionResult:
+        del kwargs
         self.requests.append(request)
 
         order = None
@@ -129,7 +137,28 @@ class FakeExecutionService:
             outcome=self.execution_outcome,
             message="fake execution result",
             order=order,
+            newly_filled_quantity=(
+                float(request.quantity)
+                if self.execution_outcome
+                is ExecutionOutcome.FILLED
+                else 0.0
+            ),
         )
+
+
+class MemoryPositionStateStore:
+    def __init__(
+        self,
+        position: TrackedPosition | None = None,
+    ) -> None:
+        self.position = position
+
+    def load(self, symbol: str) -> TrackedPosition | None:
+        del symbol
+        return self.position
+
+    def save(self, position: TrackedPosition) -> None:
+        self.position = position
 
 
 class RecordingRiskStore:
@@ -162,6 +191,8 @@ def make_event(
             tzinfo=timezone.utc,
         ),
         entry_quantity=2,
+        timeframe_minutes=15,
+        reference_price=100.0,
     )
 
 
@@ -189,6 +220,27 @@ def make_coordinator(
     store: RecordingRiskStore | None = None,
     logger=None,
 ) -> SignalExecutionCoordinator:
+    tracked_position = (
+        TrackedPosition(
+            symbol="SPY",
+            quantity=service.positions[0].quantity,
+            average_entry_price=(
+                service.positions[0].average_entry_price
+            ),
+            updated_at=datetime(
+                2026,
+                1,
+                2,
+                14,
+                30,
+                tzinfo=timezone.utc,
+            ),
+            strategy_name="ema_crossover_9_21",
+            position_generation_id="pg-test",
+        )
+        if service.positions
+        else None
+    )
     return SignalExecutionCoordinator(
         execution_service=service,  # type: ignore[arg-type]
         risk_manager=(
@@ -197,6 +249,11 @@ def make_coordinator(
             else RiskManager()
         ),
         risk_state_store=store,  # type: ignore[arg-type]
+        position_state_store=(
+            MemoryPositionStateStore(
+                tracked_position
+            )
+        ),
         logger=logger,
     )
 
@@ -317,6 +374,51 @@ def test_risk_limit_blocks_entry() -> None:
         "max_trades_per_session"
     )
     assert service.requests == []
+
+
+@pytest.mark.parametrize("buying_power", [199.99, float("nan")])
+def test_entry_requires_sufficient_known_buying_power(
+    buying_power: float,
+) -> None:
+    service = FakeExecutionService()
+    service.account = replace(
+        service.account,
+        buying_power=buying_power,
+    )
+
+    result = make_coordinator(service).handle(
+        make_event(StrategySignal.ENTER_LONG)
+    )
+
+    assert result.outcome is SignalHandlingOutcome.BLOCKED
+    assert result.reason == BUYING_POWER_REASON
+    assert service.requests == []
+
+
+def test_entry_requires_reference_price() -> None:
+    service = FakeExecutionService()
+    event = replace(
+        make_event(StrategySignal.ENTER_LONG),
+        reference_price=None,
+    )
+
+    result = make_coordinator(service).handle(event)
+
+    assert result.reason == REFERENCE_PRICE_REASON
+    assert service.requests == []
+
+
+def test_exit_bypasses_buying_power_gate() -> None:
+    service = FakeExecutionService()
+    service.positions = [make_position()]
+    service.account = replace(service.account, buying_power=0.0)
+
+    result = make_coordinator(service).handle(
+        make_event(StrategySignal.EXIT_LONG)
+    )
+
+    assert result.outcome is SignalHandlingOutcome.ORDER_ATTEMPTED
+    assert service.requests[0].side is OrderSide.SELL
 
 
 def test_dry_run_does_not_mutate_risk_state() -> None:

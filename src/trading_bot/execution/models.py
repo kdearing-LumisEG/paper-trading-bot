@@ -25,6 +25,9 @@ class ExecutionOutcome(str, Enum):
     FILLED = "filled"
     TERMINAL = "terminal"
     TIMEOUT = "timeout"
+    RECONCILIATION_REQUIRED = (
+        "reconciliation_required"
+    )
 
 
 @dataclass(frozen=True)
@@ -35,6 +38,8 @@ class ExecutionSettings:
     poll_interval_seconds: float = 1.0
     max_poll_attempts: int = 10
     cancel_on_timeout: bool = True
+    cancellation_confirmation_poll_seconds: float = 1.0
+    cancellation_confirmation_timeout_seconds: float = 10.0
 
     def __post_init__(self) -> None:
         if (
@@ -59,6 +64,28 @@ class ExecutionSettings:
                 "max_poll_attempts must be a positive integer."
             )
 
+        for field_name, value in {
+            "cancellation_confirmation_poll_seconds": (
+                self.cancellation_confirmation_poll_seconds
+            ),
+            "cancellation_confirmation_timeout_seconds": (
+                self.cancellation_confirmation_timeout_seconds
+            ),
+        }.items():
+            if not math.isfinite(value) or value <= 0:
+                raise ExecutionSettingsError(
+                    f"{field_name} must be finite and positive."
+                )
+
+        if (
+            self.cancellation_confirmation_timeout_seconds
+            < self.cancellation_confirmation_poll_seconds
+        ):
+            raise ExecutionSettingsError(
+                "Cancellation confirmation timeout must be at least "
+                "the poll interval."
+            )
+
 
 @dataclass(frozen=True)
 class ExecutionResult:
@@ -70,3 +97,7 @@ class ExecutionResult:
     order: BrokerOrder | None = None
     poll_count: int = 0
     cancellation_requested: bool = False
+    intent_id: str | None = None
+    lifecycle_state: str | None = None
+    newly_filled_quantity: float = 0.0
+    audit_logging_error: str | None = None

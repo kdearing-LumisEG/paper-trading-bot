@@ -39,12 +39,16 @@ from trading_bot.execution.kill_switch import (
 )
 from trading_bot.execution.logging import (
     JsonlExecutionLogger,
+    JsonlOrderLifecycleLogger,
 )
 from trading_bot.execution.models import (
     ExecutionSettings,
 )
 from trading_bot.execution.position_state import (
     JsonPositionStateStore,
+)
+from trading_bot.execution.order_state import (
+    JsonOrderStateStore,
 )
 from trading_bot.execution.risk_state import (
     JsonRiskStateStore,
@@ -318,6 +322,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     signal_parser.add_argument(
+        "--reference-price",
+        type=float,
+        help=(
+            "Conservative entry-price estimate required for "
+            "mutating enter-long signals."
+        ),
+    )
+
+    signal_parser.add_argument(
         "--signal-time",
         type=_parse_datetime,
         required=True,
@@ -418,6 +431,8 @@ def _risk_config(
 def _execution_service(
     settings: Settings,
     arguments: argparse.Namespace,
+    position_store: JsonPositionStateStore,
+    order_store: JsonOrderStateStore,
 ) -> PaperExecutionService:
     execution = settings.paper_execution
 
@@ -462,12 +477,25 @@ def _execution_service(
             max_poll_attempts=(
                 max_poll_attempts
             ),
+            cancellation_confirmation_poll_seconds=(
+                execution
+                .cancellation_confirmation_poll_seconds
+            ),
+            cancellation_confirmation_timeout_seconds=(
+                execution
+                .cancellation_confirmation_timeout_seconds
+            ),
         ),
         kill_switch=FileKillSwitch(
             arguments.kill_switch_path
         ),
         logger=JsonlExecutionLogger(
             execution.order_log_path
+        ),
+        order_state_store=order_store,
+        position_state_store=position_store,
+        lifecycle_logger=JsonlOrderLifecycleLogger(
+            execution.lifecycle_log_path
         ),
     )
 
@@ -500,6 +528,7 @@ def _reconciliation_service(
     settings: Settings,
     service: PaperExecutionService,
     position_store: JsonPositionStateStore,
+    order_store: JsonOrderStateStore,
 ) -> ReconciliationService:
     reconciliation = settings.reconciliation
 
@@ -514,6 +543,7 @@ def _reconciliation_service(
         logger=JsonlReconciliationLogger(
             reconciliation.report_log_path
         ),
+        order_state_store=order_store,
     )
 
 
@@ -612,14 +642,19 @@ def main() -> None:
         )
         return
 
-    service = _execution_service(
-        settings=settings,
-        arguments=arguments,
-    )
-
     position_store = JsonPositionStateStore(
         reconciliation_settings
         .position_state_path
+    )
+    order_store = JsonOrderStateStore(
+        execution.order_state_path
+    )
+
+    service = _execution_service(
+        settings=settings,
+        arguments=arguments,
+        position_store=position_store,
+        order_store=order_store,
     )
 
     if arguments.command == "account":
@@ -642,6 +677,7 @@ def main() -> None:
         settings=settings,
         service=service,
         position_store=position_store,
+        order_store=order_store,
     )
 
     try:
@@ -759,6 +795,22 @@ def main() -> None:
                 )
                 return
 
+            if (
+                arguments.command in {"buy", "sell"}
+                and arguments.execute
+            ):
+                _print_json(
+                    {
+                        "outcome": "blocked",
+                        "reason": "manual_execution_disabled",
+                        "message": (
+                            "Manual broker-mutating commands are "
+                            "disabled for the Paper Execution Core MVP."
+                        ),
+                    }
+                )
+                return
+
             symbol = (
                 arguments.symbol
                 if arguments.symbol is not None
@@ -801,6 +853,12 @@ def main() -> None:
                         if arguments.quantity
                         is not None
                         else execution.quantity
+                    ),
+                    timeframe_minutes=(
+                        settings.timeframe_minutes
+                    ),
+                    reference_price=(
+                        arguments.reference_price
                     ),
                 )
 

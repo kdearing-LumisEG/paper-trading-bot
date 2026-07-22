@@ -12,9 +12,49 @@ An educational Python project for learning:
 
 ## Current milestone
 
-Milestone 2D: Equity curve generation, performance reporting, and export utilities.
+The strategy runtime supports durable Alpaca paper execution. Live trading is
+not supported. Execution remains a dry run unless `--execute` is supplied, and
+the active Alpaca client must positively prove both sandbox mode and the paper
+endpoint before an order can be submitted or canceled.
 
-No live trading is permitted during the current stage.
+Real paper submission is available only through the strategy-controlled paths:
+
+```powershell
+.\.venv\Scripts\python.exe -m trading_bot.main run-once --execute
+.\.venv\Scripts\python.exe -m trading_bot.main signal --signal enter_long --signal-time 2026-01-02T15:00:00Z --reference-price 500 --execute
+```
+
+Do not add `--execute` when validating configuration or broker state. Manual
+`buy` and `sell` commands remain available for dry-run inspection, but their
+`--execute` forms are intentionally blocked.
+
+## Execution recovery
+
+Strategy actions are persisted to `logs/execution/order_state.json` before the
+broker call. A deterministic intent and Alpaca client-order ID prevent the same
+logical action from being submitted twice after a retry or restart. Confirmed
+partial fills immediately update the owned position quantity. When submission
+or cancellation cannot be proven, the intent becomes
+`reconciliation_required`; it is never automatically replaced or resubmitted.
+
+Run these read-only checks before a controlled paper session:
+
+```powershell
+.\.venv\Scripts\python.exe -m trading_bot.main reconcile
+.\.venv\Scripts\python.exe -m trading_bot.main positions
+.\.venv\Scripts\python.exe -m trading_bot.main lock-status
+```
+
+Reconciliation matches broker orders by deterministic client-order ID and
+fails closed for unknown orders, unresolved intents, quantity mismatches, and
+open legacy position records without a position-generation ID. Version-1 flat
+position records remain readable; open legacy records are not adopted or
+upgraded automatically. The runtime lock is never cleared automatically.
+
+Lifecycle audit events are appended to
+`logs/execution/order_lifecycle.jsonl`. Configuration for order state and
+cancellation confirmation lives under `paper_execution` in
+`config/strategy.yaml`.
 
 ## Example usage
 

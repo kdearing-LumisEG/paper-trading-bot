@@ -14,6 +14,12 @@ from trading_bot.broker.models import (
 from trading_bot.main import (
     build_parser,
 )
+from trading_bot.config import (
+    PaperExecutionSettings,
+    ReconciliationSettings,
+    Settings,
+    StrategySettings,
+)
 from trading_bot.runtime.reconciliation import (
     ReconciliationIssue,
     ReconciliationIssueCode,
@@ -58,6 +64,9 @@ def test_reconciliation_failure_blocks_run_once(
             max_consecutive_losses=None,
             risk_state_path=(
                 tmp_path / "risk.json"
+            ),
+            order_state_path=(
+                tmp_path / "orders.json"
             ),
         ),
         reconciliation=SimpleNamespace(
@@ -156,3 +165,93 @@ def test_reconciliation_failure_blocks_run_once(
         settings.reconciliation
         .process_lock_path.exists()
     )
+
+
+@pytest.mark.parametrize("command", ["buy", "sell"])
+def test_manual_execute_is_structurally_blocked_without_mutation(
+    command: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        alpaca_api_key="test-key",
+        alpaca_secret_key="test-secret",
+        symbol="SPY",
+        timeframe_minutes=15,
+        data_feed="iex",
+        strategy=StrategySettings(fast_ema=9, slow_ema=21),
+        paper_execution=PaperExecutionSettings(
+            risk_state_path=tmp_path / "risk.json",
+            order_state_path=tmp_path / "orders.json",
+        ),
+        reconciliation=ReconciliationSettings(
+            process_lock_path=tmp_path / "runtime.lock",
+            position_state_path=tmp_path / "positions.json",
+        ),
+    )
+    safe_report = ReconciliationReport(
+        checked_at=datetime(2026, 7, 21, tzinfo=timezone.utc),
+        symbol="SPY",
+        safe=True,
+        adopted=False,
+        account=AccountSnapshot(
+            account_id="paper-account",
+            cash=1000,
+            buying_power=1000,
+            equity=1000,
+            trading_blocked=False,
+            account_blocked=False,
+        ),
+        broker_positions=[],
+        open_orders=[],
+        tracked_position=None,
+        issues=[],
+    )
+
+    class NoMutationService:
+        def execute_market_order(self, *args, **kwargs):
+            del args, kwargs
+            pytest.fail("manual execute reached broker mutation")
+
+    class SafeReconciler:
+        def run(self) -> ReconciliationReport:
+            return safe_report
+
+    output: list[object] = []
+    monkeypatch.setattr(main_module, "load_settings", lambda: settings)
+    monkeypatch.setattr(
+        main_module,
+        "_execution_service",
+        lambda **kwargs: NoMutationService(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_reconciliation_service",
+        lambda **kwargs: SafeReconciler(),
+    )
+    monkeypatch.setattr(main_module, "_print_json", output.append)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "trading-bot",
+            command,
+            "--quantity",
+            "1",
+            "--client-order-id",
+            "manual-test",
+            "--execute",
+        ],
+    )
+
+    main_module.main()
+
+    assert output == [
+        {
+            "outcome": "blocked",
+            "reason": "manual_execution_disabled",
+            "message": (
+                "Manual broker-mutating commands are disabled for the "
+                "Paper Execution Core MVP."
+            ),
+        }
+    ]

@@ -16,6 +16,56 @@ class BrokerModelError(ValueError):
     """Raised when a broker-neutral model is invalid."""
 
 
+class PaperEnvironmentStatus(str, Enum):
+    """Strength of evidence for the active trading environment."""
+
+    VERIFIED_PAPER = "verified_paper"
+    NOT_PAPER = "not_paper"
+    UNVERIFIABLE = "unverifiable"
+
+
+@dataclass(frozen=True)
+class PaperEnvironmentVerification:
+    """Broker-neutral proof that mutations target paper trading."""
+
+    status: PaperEnvironmentStatus
+    message: str
+
+    @property
+    def verified(self) -> bool:
+        return self.status is (
+            PaperEnvironmentStatus.VERIFIED_PAPER
+        )
+
+
+class BrokerErrorKind(str, Enum):
+    """Safe broker failure categories used by execution recovery."""
+
+    AUTHENTICATION = "authentication"
+    AUTHORIZATION = "authorization"
+    RATE_LIMIT = "rate_limit"
+    NETWORK = "network"
+    TIMEOUT_BEFORE_TRANSMISSION = (
+        "timeout_before_transmission"
+    )
+    AMBIGUOUS_SUBMISSION = "ambiguous_submission"
+    BROKER_REJECTION = "broker_rejection"
+    INVALID_REQUEST = "invalid_request"
+    UNKNOWN_BROKER_ERROR = "unknown_broker_error"
+
+
+class BrokerExecutionError(RuntimeError):
+    """Typed, sanitized broker-operation failure."""
+
+    def __init__(
+        self,
+        kind: BrokerErrorKind,
+        message: str,
+    ) -> None:
+        super().__init__(message)
+        self.kind = kind
+
+
 class OrderSide(str, Enum):
     """Supported long-only order sides."""
 
@@ -131,6 +181,7 @@ class BrokerOrder:
     filled_quantity: float = 0.0
     filled_average_price: float | None = None
     submitted_at: datetime | None = None
+    rejection_reason: str | None = None
 
     def __post_init__(self) -> None:
         if not self.order_id.strip():

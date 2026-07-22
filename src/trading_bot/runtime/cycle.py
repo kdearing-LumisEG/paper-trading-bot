@@ -19,6 +19,7 @@ from trading_bot.data.validation import (
     validate_bars,
 )
 from trading_bot.execution.signal_models import (
+    SignalHandlingOutcome,
     SignalHandlingResult,
     StrategySignal,
     StrategySignalEvent,
@@ -518,6 +519,7 @@ class MarketSignalCycle:
 
         if (
             not force
+            and not forced_session_flatten
             and self._signal_state_store
             .is_processed(
                 strategy_name=(
@@ -569,6 +571,22 @@ class MarketSignalCycle:
             entry_quantity=(
                 settings.entry_quantity
             ),
+            timeframe_minutes=(
+                settings.timeframe_minutes
+            ),
+            reference_price=float(
+                completed["close"].iloc[-1]
+            ),
+            action=(
+                "session_flatten"
+                if forced_session_flatten
+                else signal.value
+            ),
+            identity_time=(
+                clock.next_close
+                if forced_session_flatten
+                else latest_bar_end
+            ),
         )
 
         signal_result = (
@@ -577,18 +595,27 @@ class MarketSignalCycle:
             )
         )
 
-        self._signal_state_store.mark_processed(
-            strategy_name=(
-                settings.strategy_name
-            ),
-            symbol=settings.symbol,
-            timeframe_minutes=(
-                settings.timeframe_minutes
-            ),
-            bar_end=latest_bar_end,
-            signal=signal.value,
-            handled_at=clock.timestamp,
+        action_captured = (
+            signal_result.outcome is not SignalHandlingOutcome.BLOCKED
+            or (
+                signal_result.execution_result is not None
+                and signal_result.execution_result.intent_id
+                is not None
+            )
         )
+        if action_captured:
+            self._signal_state_store.mark_processed(
+                strategy_name=(
+                    settings.strategy_name
+                ),
+                symbol=settings.symbol,
+                timeframe_minutes=(
+                    settings.timeframe_minutes
+                ),
+                bar_end=latest_bar_end,
+                signal=signal.value,
+                handled_at=clock.timestamp,
+            )
 
         return MarketSignalCycleResult(
             outcome=(

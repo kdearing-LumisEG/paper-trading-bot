@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import date, datetime
 from enum import Enum
 import json
@@ -10,6 +10,71 @@ from pathlib import Path
 from typing import Protocol
 
 from trading_bot.execution.models import ExecutionResult
+
+
+@dataclass(frozen=True)
+class OrderLifecycleEvent:
+    """Correlated append-only event for order and position recovery."""
+
+    event_type: str
+    timestamp: datetime
+    intent_id: str
+    client_order_id: str
+    position_generation_id: str
+    strategy_name: str
+    symbol: str
+    action: str
+    lifecycle_state: str
+    event_version: int = 1
+    broker_order_id: str | None = None
+    filled_quantity: float = 0.0
+    message: str | None = None
+
+
+class OrderLifecycleLogger(Protocol):
+    """Destination for correlated lifecycle events."""
+
+    def log_event(
+        self,
+        event: OrderLifecycleEvent,
+    ) -> None: ...
+
+
+class NullOrderLifecycleLogger:
+    """Discard lifecycle events."""
+
+    def log_event(
+        self,
+        event: OrderLifecycleEvent,
+    ) -> None:
+        del event
+
+
+class JsonlOrderLifecycleLogger:
+    """Append versioned lifecycle events as JSON lines."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def log_event(
+        self,
+        event: OrderLifecycleEvent,
+    ) -> None:
+        self._path.parent.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        with self._path.open(
+            "a",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(
+                asdict(event),
+                handle,
+                default=JsonlExecutionLogger._json_default,
+                sort_keys=True,
+            )
+            handle.write("\n")
 
 
 class ExecutionLogger(Protocol):

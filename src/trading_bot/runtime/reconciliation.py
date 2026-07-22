@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from enum import Enum
 import json
@@ -16,8 +16,15 @@ from trading_bot.broker.models import (
     PositionSnapshot,
 )
 from trading_bot.execution.position_state import (
+    PositionPhase,
     PositionStateStore,
     TrackedPosition,
+)
+from trading_bot.execution.order_state import (
+    NullOrderStateStore,
+    OrderIntent,
+    OrderStateError,
+    OrderStateStore,
 )
 from trading_bot.execution.service import (
     PaperExecutionService,
@@ -40,6 +47,13 @@ class ReconciliationIssueCode(str, Enum):
     AVERAGE_ENTRY_PRICE_MISMATCH = "average_entry_price_mismatch"
     INVALID_TRACKED_POSITION = "invalid_tracked_position"
     ADOPTION_NOT_ALLOWED = "adoption_not_allowed"
+    UNRESOLVED_ORDER_INTENT = "unresolved_order_intent"
+    ORDER_INTENT_MISMATCH = "order_intent_mismatch"
+    LEGACY_OPEN_POSITION = "legacy_open_position"
+    POSITION_GENERATION_MISMATCH = (
+        "position_generation_mismatch"
+    )
+    ORDER_STATE_INVALID = "order_state_invalid"
 
 
 @dataclass(frozen=True)
@@ -66,6 +80,19 @@ class ReconciliationReport:
     open_orders: list[BrokerOrder]
     tracked_position: TrackedPosition | None
     issues: list[ReconciliationIssue]
+    matched_order_intents: list[str] = field(
+        default_factory=list
+    )
+    advanced_order_intents: list[str] = field(
+        default_factory=list
+    )
+    unresolved_order_intents: list[str] = field(
+        default_factory=list
+    )
+    unknown_broker_orders: list[BrokerOrder] = field(
+        default_factory=list
+    )
+    position_generation_status: str = "not_applicable"
 
     @property
     def issue_codes(self) -> list[str]:
@@ -170,6 +197,7 @@ class ReconciliationService:
         symbol: str,
         average_price_tolerance: float = 0.01,
         logger: ReconciliationLogger | None = None,
+        order_state_store: OrderStateStore | None = None,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         normalized_symbol = symbol.strip().upper()
@@ -193,6 +221,11 @@ class ReconciliationService:
         self._execution_service = execution_service
         self._position_state_store = (
             position_state_store
+        )
+        self._order_state_store = (
+            order_state_store
+            if order_state_store is not None
+            else NullOrderStateStore()
         )
         self._symbol = normalized_symbol
         self._average_price_tolerance = (
@@ -390,6 +423,46 @@ class ReconciliationService:
 
             return issues
 
+        if (
+            tracked_position.legacy_open
+            or (
+                tracked_position.quantity > 0
+                and not tracked_position
+                .position_generation_id
+            )
+        ):
+            issues.append(
+                ReconciliationIssue(
+                    code=(
+                        ReconciliationIssueCode
+                        .LEGACY_OPEN_POSITION
+                    ),
+                    message=(
+                        "An open legacy position lacks generation "
+                        "metadata and cannot be upgraded automatically."
+                    ),
+                    symbol=self._symbol,
+                )
+            )
+            return issues
+
+        if tracked_position.phase is (
+            PositionPhase.RECONCILIATION_REQUIRED
+        ):
+            issues.append(
+                ReconciliationIssue(
+                    code=(
+                        ReconciliationIssueCode
+                        .POSITION_GENERATION_MISMATCH
+                    ),
+                    message=(
+                        "Local position ownership requires reconciliation."
+                    ),
+                    symbol=self._symbol,
+                )
+            )
+            return issues
+
         if not _is_whole_number(
             tracked_position.quantity
         ):
@@ -527,24 +600,130 @@ class ReconciliationService:
         if not configured_positions:
             return True
 
-        position = configured_positions[0]
+        # Open-position adoption/upgrade is explicitly outside this package.
+        return False
 
-        return (
-            _is_whole_number(
-                position.quantity
-            )
-            and (
-                position.quantity == 0
-                or (
-                    math.isfinite(
-                        position
-                        .average_entry_price
+    def _reconcile_order_intents(
+        self,
+        *,
+        intents: tuple[OrderIntent, ...],
+        open_orders: list[BrokerOrder],
+    ) -> tuple[
+        list[str],
+        list[str],
+        list[str],
+        list[BrokerOrder],
+        list[ReconciliationIssue],
+    ]:
+        matched: list[str] = []
+        advanced_ids: list[str] = []
+        unresolved: list[str] = []
+        issues: list[ReconciliationIssue] = []
+        matched_order_ids: set[str] = set()
+
+        for intent in intents:
+            if intent.lifecycle_state.is_terminal:
+                continue
+
+            matches = [
+                order
+                for order in open_orders
+                if order.client_order_id
+                == intent.client_order_id
+            ]
+
+            if len(matches) > 1:
+                unresolved.append(intent.intent_id)
+                issues.append(
+                    ReconciliationIssue(
+                        code=(
+                            ReconciliationIssueCode
+                            .ORDER_INTENT_MISMATCH
+                        ),
+                        message=(
+                            "Multiple broker orders match one durable intent."
+                        ),
+                        symbol=intent.symbol,
+                        client_order_id=(
+                            intent.client_order_id
+                        ),
                     )
-                    and position
-                    .average_entry_price
-                    > 0
                 )
-            )
+                continue
+
+            try:
+                if matches:
+                    broker_order = matches[0]
+                    matched_order_ids.add(
+                        broker_order.order_id
+                    )
+                    current = (
+                        self._execution_service
+                        .reconcile_known_order(
+                            intent,
+                            broker_order,
+                        )
+                    )
+                else:
+                    current = (
+                        self._execution_service
+                        .reconcile_order_intent(intent)
+                    )
+            except Exception as exc:
+                unresolved.append(intent.intent_id)
+                issues.append(
+                    ReconciliationIssue(
+                        code=(
+                            ReconciliationIssueCode
+                            .UNRESOLVED_ORDER_INTENT
+                        ),
+                        message=(
+                            "Durable order reconciliation failed: "
+                            f"{type(exc).__name__}."
+                        ),
+                        symbol=intent.symbol,
+                        client_order_id=(
+                            intent.client_order_id
+                        ),
+                    )
+                )
+                continue
+
+            matched.append(intent.intent_id)
+            if current != intent:
+                advanced_ids.append(intent.intent_id)
+
+            if current.lifecycle_state.is_unresolved:
+                unresolved.append(intent.intent_id)
+                issues.append(
+                    ReconciliationIssue(
+                        code=(
+                            ReconciliationIssueCode
+                            .UNRESOLVED_ORDER_INTENT
+                        ),
+                        message=(
+                            "A durable order intent remains nonterminal "
+                            "or uncertain."
+                        ),
+                        symbol=current.symbol,
+                        order_id=current.broker_order_id,
+                        client_order_id=(
+                            current.client_order_id
+                        ),
+                    )
+                )
+
+        unknown_orders = [
+            order
+            for order in open_orders
+            if order.order_id not in matched_order_ids
+        ]
+        return (
+            matched,
+            advanced_ids,
+            unresolved,
+            unknown_orders,
+            issues,
         )
 
     def run(
@@ -577,6 +756,40 @@ class ReconciliationService:
             .list_open_orders()
         )
 
+        order_state_issues: list[
+            ReconciliationIssue
+        ] = []
+        try:
+            order_intents = (
+                self._order_state_store.load_all()
+            )
+        except OrderStateError:
+            order_intents = ()
+            order_state_issues.append(
+                ReconciliationIssue(
+                    code=(
+                        ReconciliationIssueCode
+                        .ORDER_STATE_INVALID
+                    ),
+                    message=(
+                        "Durable order-state data is invalid and "
+                        "was left untouched."
+                    ),
+                    symbol=self._symbol,
+                )
+            )
+
+        (
+            matched_order_intents,
+            advanced_order_intents,
+            unresolved_order_intents,
+            unknown_broker_orders,
+            order_intent_issues,
+        ) = self._reconcile_order_intents(
+            intents=order_intents,
+            open_orders=open_orders,
+        )
+
         adopted = False
 
         if adopt_position:
@@ -584,6 +797,9 @@ class ReconciliationService:
                 account=account,
                 positions=positions,
                 open_orders=open_orders,
+            ) and not (
+                order_state_issues
+                or order_intent_issues
             ):
                 configured_positions = (
                     self._configured_positions(
@@ -634,7 +850,11 @@ class ReconciliationService:
         issues = self._base_issues(
             account=account,
             positions=positions,
-            open_orders=open_orders,
+            open_orders=unknown_broker_orders,
+        )
+        issues[:0] = (
+            order_state_issues
+            + order_intent_issues
         )
 
         configured_positions = (
@@ -687,6 +907,34 @@ class ReconciliationService:
                 tracked_position
             ),
             issues=issues,
+            matched_order_intents=(
+                matched_order_intents
+            ),
+            advanced_order_intents=(
+                advanced_order_intents
+            ),
+            unresolved_order_intents=(
+                unresolved_order_intents
+            ),
+            unknown_broker_orders=(
+                unknown_broker_orders
+            ),
+            position_generation_status=(
+                "legacy_open"
+                if (
+                    tracked_position is not None
+                    and tracked_position.legacy_open
+                )
+                else (
+                    "generation_aware"
+                    if (
+                        tracked_position is not None
+                        and tracked_position
+                        .position_generation_id
+                    )
+                    else "not_applicable"
+                )
+            ),
         )
 
         self._logger.log(report)

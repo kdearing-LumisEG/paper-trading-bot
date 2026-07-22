@@ -3,8 +3,6 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
-
 from trading_bot.broker.models import (
     AccountSnapshot,
     BrokerOrder,
@@ -173,6 +171,8 @@ def test_matching_tracked_position_is_safe(
             symbol="SPY",
             quantity=1.0,
             average_entry_price=500.0,
+            strategy_name="ema_9_21",
+            position_generation_id="pg-1",
             updated_at=datetime.now(
                 timezone.utc
             ),
@@ -202,6 +202,8 @@ def test_quantity_mismatch_fails_closed(
             symbol="SPY",
             quantity=1.0,
             average_entry_price=500.0,
+            strategy_name="ema_9_21",
+            position_generation_id="pg-1",
             updated_at=datetime.now(
                 timezone.utc
             ),
@@ -247,7 +249,7 @@ def test_unexpected_symbol_position_fails_closed(
     )
 
 
-def test_explicit_adoption_tracks_safe_position(
+def test_explicit_open_position_adoption_is_disabled(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "position.json"
@@ -266,18 +268,18 @@ def test_explicit_adoption_tracks_safe_position(
         adopt_position=True
     )
 
-    assert report.safe
-    assert report.adopted
+    assert not report.safe
+    assert not report.adopted
 
     tracked = JsonPositionStateStore(
         path
     ).load("SPY")
 
-    assert tracked is not None
-    assert tracked.adopted
-    assert tracked.quantity == pytest.approx(2.0)
-    assert tracked.average_entry_price == pytest.approx(
-        501.25
+    assert tracked is None
+    assert (
+        ReconciliationIssueCode
+        .ADOPTION_NOT_ALLOWED.value
+        in report.issue_codes
     )
 
 

@@ -19,11 +19,15 @@ from alpaca.trading.requests import (
 
 from trading_bot.broker.models import (
     AccountSnapshot,
+    BrokerErrorKind,
+    BrokerExecutionError,
     BrokerOrder,
     BrokerOrderStatus,
     MarketClockSnapshot,
     MarketOrderRequest,
     OrderSide,
+    PaperEnvironmentStatus,
+    PaperEnvironmentVerification,
     PositionSnapshot,
 )
 
@@ -106,6 +110,100 @@ def _is_not_found(error: APIError) -> bool:
     return "not found" in message
 
 
+def _paper_environment_evidence(
+    client: object,
+) -> PaperEnvironmentVerification:
+    """Isolate SDK endpoint inspection behind one tested boundary."""
+
+    sandbox = getattr(client, "_sandbox", None)
+    raw_base_url = getattr(client, "_base_url", None)
+    base_url = str(
+        getattr(raw_base_url, "value", raw_base_url)
+        or ""
+    ).rstrip("/").lower()
+    expected = "https://paper-api.alpaca.markets"
+
+    if sandbox is True and base_url == expected:
+        return PaperEnvironmentVerification(
+            status=PaperEnvironmentStatus.VERIFIED_PAPER,
+            message=(
+                "Alpaca client sandbox mode and paper endpoint "
+                "were both verified."
+            ),
+        )
+
+    if sandbox is False or (
+        base_url
+        and base_url != expected
+    ):
+        return PaperEnvironmentVerification(
+            status=PaperEnvironmentStatus.NOT_PAPER,
+            message=(
+                "Alpaca client evidence does not identify the "
+                "paper endpoint."
+            ),
+        )
+
+    return PaperEnvironmentVerification(
+        status=PaperEnvironmentStatus.UNVERIFIABLE,
+        message=(
+            "Alpaca client does not expose sufficient paper "
+            "environment evidence."
+        ),
+    )
+
+
+def _broker_error(
+    error: Exception,
+    *,
+    operation: str,
+    submission_ambiguous: bool = False,
+) -> BrokerExecutionError:
+    if isinstance(error, BrokerExecutionError):
+        return error
+
+    status_code = getattr(error, "status_code", None)
+    if status_code == 401:
+        kind = BrokerErrorKind.AUTHENTICATION
+    elif status_code == 403:
+        kind = BrokerErrorKind.AUTHORIZATION
+    elif status_code == 429:
+        kind = BrokerErrorKind.RATE_LIMIT
+    elif status_code in {400, 404, 405, 422}:
+        kind = BrokerErrorKind.INVALID_REQUEST
+    else:
+        error_name = type(error).__name__.lower()
+        if submission_ambiguous and any(
+            value in error_name
+            for value in (
+                "timeout",
+                "connection",
+                "network",
+                "retry",
+            )
+        ):
+            kind = BrokerErrorKind.AMBIGUOUS_SUBMISSION
+        elif any(
+            value in error_name
+            for value in (
+                "timeout",
+                "connection",
+                "network",
+                "retry",
+            )
+        ):
+            kind = BrokerErrorKind.NETWORK
+        elif submission_ambiguous:
+            kind = BrokerErrorKind.AMBIGUOUS_SUBMISSION
+        else:
+            kind = BrokerErrorKind.UNKNOWN_BROKER_ERROR
+
+    return BrokerExecutionError(
+        kind,
+        f"Alpaca {operation} failed ({kind.value}).",
+    )
+
+
 class AlpacaPaperBroker:
     """Whole-share stock execution against Alpaca's paper endpoint."""
 
@@ -129,6 +227,20 @@ class AlpacaPaperBroker:
                 paper=True,
             )
         )
+    def verify_paper_environment(
+        self,
+    ) -> PaperEnvironmentVerification:
+        """Return isolated positive evidence for Alpaca paper mode."""
+
+        return _paper_environment_evidence(self._client)
+
+    def _require_paper_environment(self) -> None:
+        verification = self.verify_paper_environment()
+        if not verification.verified:
+            raise BrokerExecutionError(
+                BrokerErrorKind.AUTHORIZATION,
+                verification.message,
+            )
 
     @staticmethod
     def _to_order(order: Any) -> BrokerOrder:
@@ -170,41 +282,69 @@ class AlpacaPaperBroker:
                 "submitted_at",
                 None,
             ),
+            rejection_reason=(
+                str(getattr(order, "reject_reason"))
+                if getattr(
+                    order,
+                    "reject_reason",
+                    None,
+                )
+                is not None
+                else None
+            ),
         )
 
     def submit_market_order(
         self,
         request: MarketOrderRequest,
     ) -> BrokerOrder:
+        self._require_paper_environment()
         alpaca_side = (
             AlpacaOrderSide.BUY
             if request.side is OrderSide.BUY
             else AlpacaOrderSide.SELL
         )
 
-        order_data = AlpacaMarketOrderRequest(
-            symbol=request.symbol,
-            qty=request.quantity,
-            side=alpaca_side,
-            time_in_force=TimeInForce.DAY,
-            client_order_id=(
-                request.client_order_id
-            ),
-        )
+        try:
+            order_data = AlpacaMarketOrderRequest(
+                symbol=request.symbol,
+                qty=request.quantity,
+                side=alpaca_side,
+                time_in_force=TimeInForce.DAY,
+                client_order_id=(
+                    request.client_order_id
+                ),
+            )
+        except Exception as exc:
+            raise BrokerExecutionError(
+                BrokerErrorKind.INVALID_REQUEST,
+                "Alpaca order request could not be constructed.",
+            ) from exc
 
-        order = self._client.submit_order(
-            order_data=order_data
-        )
+        try:
+            order = self._client.submit_order(
+                order_data=order_data
+            )
+        except Exception as exc:
+            raise _broker_error(
+                exc,
+                operation="order submission",
+                submission_ambiguous=True,
+            ) from exc
         return self._to_order(order)
 
     def get_order(
         self,
         order_id: str,
     ) -> BrokerOrder:
-        order = self._client.get_order_by_id(
-            order_id
-        )
-        return self._to_order(order)
+        try:
+            order = self._client.get_order_by_id(order_id)
+            return self._to_order(order)
+        except Exception as exc:
+            raise _broker_error(
+                exc,
+                operation="order lookup",
+            ) from exc
 
     def find_order_by_client_id(
         self,
@@ -214,105 +354,123 @@ class AlpacaPaperBroker:
             order = self._client.get_order_by_client_id(
                 client_order_id
             )
-        except APIError as exc:
-            if _is_not_found(exc):
+            return self._to_order(order)
+        except Exception as exc:
+            if (
+                isinstance(exc, APIError)
+                and _is_not_found(exc)
+            ):
                 return None
-            raise
-
-        return self._to_order(order)
+            raise _broker_error(
+                exc,
+                operation="client-order-id lookup",
+            ) from exc
 
     def cancel_order(
         self,
         order_id: str,
     ) -> None:
-        self._client.cancel_order_by_id(order_id)
+        self._require_paper_environment()
+        try:
+            self._client.cancel_order_by_id(order_id)
+        except Exception as exc:
+            raise _broker_error(
+                exc,
+                operation="order cancellation",
+                submission_ambiguous=True,
+            ) from exc
 
     def get_account(self) -> AccountSnapshot:
-        account = self._client.get_account()
-
-        return AccountSnapshot(
-            account_id=str(account.id),
-            cash=_required_float(
-                account.cash,
-                "cash",
-            ),
-            buying_power=_required_float(
-                account.buying_power,
-                "buying_power",
-            ),
-            equity=_required_float(
-                account.equity,
-                "equity",
-            ),
-            trading_blocked=bool(
-                account.trading_blocked
-            ),
-            account_blocked=bool(
-                account.account_blocked
-            ),
-        )
+        try:
+            account = self._client.get_account()
+            return AccountSnapshot(
+                account_id=str(account.id),
+                cash=_required_float(account.cash, "cash"),
+                buying_power=_required_float(
+                    account.buying_power,
+                    "buying_power",
+                ),
+                equity=_required_float(account.equity, "equity"),
+                trading_blocked=bool(account.trading_blocked),
+                account_blocked=bool(account.account_blocked),
+            )
+        except Exception as exc:
+            raise _broker_error(
+                exc,
+                operation="account lookup",
+            ) from exc
 
 
     def get_clock(self) -> MarketClockSnapshot:
-        clock = self._client.get_clock()
-
-        return MarketClockSnapshot(
-            timestamp=_required_datetime(
-                clock.timestamp,
-                "clock timestamp",
-            ),
-            is_open=bool(clock.is_open),
-            next_open=_required_datetime(
-                clock.next_open,
-                "next open",
-            ),
-            next_close=_required_datetime(
-                clock.next_close,
-                "next close",
-            ),
-        )
+        try:
+            clock = self._client.get_clock()
+            return MarketClockSnapshot(
+                timestamp=_required_datetime(
+                    clock.timestamp,
+                    "clock timestamp",
+                ),
+                is_open=bool(clock.is_open),
+                next_open=_required_datetime(
+                    clock.next_open,
+                    "next open",
+                ),
+                next_close=_required_datetime(
+                    clock.next_close,
+                    "next close",
+                ),
+            )
+        except Exception as exc:
+            raise _broker_error(
+                exc,
+                operation="market-clock lookup",
+            ) from exc
 
     def list_open_orders(
         self,
     ) -> list[BrokerOrder]:
-        orders = self._client.get_orders(
-            GetOrdersRequest(
-                status=QueryOrderStatus.OPEN,
-                limit=500,
+        try:
+            orders = self._client.get_orders(
+                GetOrdersRequest(
+                    status=QueryOrderStatus.OPEN,
+                    limit=500,
+                )
             )
-        )
-
-        return [
-            self._to_order(order)
-            for order in orders
-        ]
+            return [self._to_order(order) for order in orders]
+        except Exception as exc:
+            raise _broker_error(
+                exc,
+                operation="open-order lookup",
+            ) from exc
 
     def list_positions(
         self,
     ) -> list[PositionSnapshot]:
-        positions = self._client.get_all_positions()
-
-        return [
-            PositionSnapshot(
-                symbol=str(position.symbol).upper(),
-                quantity=_required_float(
-                    position.qty,
-                    "position qty",
-                ),
-                average_entry_price=(
-                    _required_float(
+        try:
+            positions = self._client.get_all_positions()
+            return [
+                PositionSnapshot(
+                    symbol=str(position.symbol).upper(),
+                    quantity=_required_float(
+                        position.qty,
+                        "position qty",
+                    ),
+                    average_entry_price=_required_float(
                         position.avg_entry_price,
                         "average entry price",
-                    )
-                ),
-                market_value=_required_float(
-                    position.market_value,
-                    "market value",
-                ),
-                unrealized_pnl=_required_float(
-                    position.unrealized_pl,
-                    "unrealized P&L",
-                ),
-            )
-            for position in positions
-        ]
+                    ),
+                    market_value=_required_float(
+                        position.market_value,
+                        "market value",
+                    ),
+                    unrealized_pnl=_required_float(
+                        position.unrealized_pl,
+                        "unrealized P&L",
+                    ),
+                )
+                for position in positions
+            ]
+        except Exception as exc:
+            raise _broker_error(
+                exc,
+                operation="position lookup",
+            ) from exc

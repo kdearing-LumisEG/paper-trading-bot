@@ -1,9 +1,13 @@
 """Tests for deterministic strategy client-order IDs."""
 
 from datetime import datetime, timezone
+import re
 
 from trading_bot.broker.models import OrderSide
 from trading_bot.execution.client_ids import (
+    build_order_client_order_id,
+    build_order_intent_identity,
+    build_position_generation_id,
     build_signal_client_order_id,
 )
 from trading_bot.execution.signal_models import (
@@ -74,3 +78,82 @@ def test_long_client_order_id_is_hashed_to_limit() -> None:
     )
 
     assert len(result) <= 48
+
+
+def test_durable_identity_includes_action_context() -> None:
+    event = make_event()
+    generation = build_position_generation_id(
+        strategy_name=event.strategy_name,
+        symbol=event.symbol,
+        timeframe_minutes=15,
+        signal_bar_end=event.signal_time,
+    )
+    base = build_order_intent_identity(
+        strategy_name=event.strategy_name,
+        symbol=event.symbol,
+        timeframe_minutes=15,
+        signal_bar_end=event.signal_time,
+        action="exit_long",
+        position_generation_id=generation,
+    )
+
+    assert base == build_order_intent_identity(
+        strategy_name=event.strategy_name,
+        symbol=event.symbol,
+        timeframe_minutes=15,
+        signal_bar_end=event.signal_time,
+        action="exit_long",
+        position_generation_id=generation,
+    )
+    assert base != build_order_intent_identity(
+        strategy_name=event.strategy_name,
+        symbol=event.symbol,
+        timeframe_minutes=5,
+        signal_bar_end=event.signal_time,
+        action="exit_long",
+        position_generation_id=generation,
+    )
+    assert base != build_order_intent_identity(
+        strategy_name=event.strategy_name,
+        symbol=event.symbol,
+        timeframe_minutes=15,
+        signal_bar_end=event.signal_time,
+        action="exit_long",
+        position_generation_id="different-generation",
+    )
+    assert base != build_order_intent_identity(
+        strategy_name=event.strategy_name,
+        symbol=event.symbol,
+        timeframe_minutes=15,
+        signal_bar_end=event.signal_time,
+        action="session_flatten",
+        position_generation_id=generation,
+    )
+
+
+def test_durable_client_id_is_safe_and_intent_specific() -> None:
+    first = build_order_client_order_id(
+        intent_id="a" * 64,
+        strategy_name="very long strategy name / unsafe",
+        symbol="SPY",
+        side=OrderSide.SELL,
+        action="session_flatten",
+    )
+    second = build_order_client_order_id(
+        intent_id="b" * 64,
+        strategy_name="very long strategy name / unsafe",
+        symbol="SPY",
+        side=OrderSide.SELL,
+        action="session_flatten",
+    )
+
+    assert first != second
+    assert first == build_order_client_order_id(
+        intent_id="a" * 64,
+        strategy_name="very long strategy name / unsafe",
+        symbol="SPY",
+        side=OrderSide.SELL,
+        action="session_flatten",
+    )
+    assert len(first) <= 48
+    assert re.fullmatch(r"[A-Za-z0-9._:-]+", first)

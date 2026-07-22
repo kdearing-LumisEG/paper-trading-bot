@@ -101,17 +101,16 @@ def test_positions_distinguishes_broker_and_local_state(
             "unrealized_pnl": 10.0,
         }
     ]
-    assert payload["tracked_position"] == {
-        "adopted": False,
-        "average_entry_price": 500.0,
-        "quantity": 2.0,
-        "source_client_order_id": None,
-        "source_order_id": None,
-        "symbol": "SPY",
-        "updated_at": datetime(
-            2026,
-            7,
-            21,
-            tzinfo=timezone.utc,
-        ),
-    }
+    tracked = payload["tracked_position"]
+    assert tracked["adopted"] is False
+    assert tracked["average_entry_price"] == 500.0
+    assert tracked["quantity"] == 2.0
+    assert tracked["source_client_order_id"] is None
+    assert tracked["source_order_id"] is None
+    assert tracked["symbol"] == "SPY"
+    assert tracked["updated_at"] == datetime(
+        2026,
+        7,
+        21,
+        tzinfo=timezone.utc,
+    )

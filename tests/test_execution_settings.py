@@ -40,3 +40,27 @@ def test_invalid_poll_attempt_count_fails(
         ExecutionSettings(
             max_poll_attempts=value,  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0, math.inf, math.nan])
+def test_invalid_cancellation_confirmation_duration_fails(
+    value: float,
+) -> None:
+    with pytest.raises(
+        ExecutionSettingsError,
+        match="finite and positive",
+    ):
+        ExecutionSettings(
+            cancellation_confirmation_poll_seconds=value,
+        )
+
+
+def test_cancellation_timeout_cannot_be_shorter_than_poll() -> None:
+    with pytest.raises(
+        ExecutionSettingsError,
+        match="at least the poll interval",
+    ):
+        ExecutionSettings(
+            cancellation_confirmation_poll_seconds=2,
+            cancellation_confirmation_timeout_seconds=1,
+        )

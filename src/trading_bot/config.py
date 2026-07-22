@@ -26,6 +26,8 @@ class PaperExecutionSettings:
     quantity: int = 1
     poll_interval_seconds: float = 1.0
     max_poll_attempts: int = 10
+    cancellation_confirmation_poll_seconds: float = 1.0
+    cancellation_confirmation_timeout_seconds: float = 10.0
     max_daily_loss: float | None = 25.0
     max_trades_per_session: int | None = 3
     max_consecutive_losses: int | None = 2
@@ -37,6 +39,12 @@ class PaperExecutionSettings:
     )
     risk_state_path: Path = Path(
         "logs/execution/session_risk_state.json"
+    )
+    order_state_path: Path = Path(
+        "logs/execution/order_state.json"
+    )
+    lifecycle_log_path: Path = Path(
+        "logs/execution/order_lifecycle.jsonl"
     )
 
 
@@ -342,6 +350,41 @@ def load_settings(
             ),
         )
 
+        cancellation_confirmation_poll_seconds = (
+            _positive_float(
+                execution_config.get(
+                    "cancellation_confirmation_poll_seconds",
+                    1.0,
+                ),
+                (
+                    "paper_execution."
+                    "cancellation_confirmation_poll_seconds"
+                ),
+            )
+        )
+
+        cancellation_confirmation_timeout_seconds = (
+            _positive_float(
+                execution_config.get(
+                    "cancellation_confirmation_timeout_seconds",
+                    10.0,
+                ),
+                (
+                    "paper_execution."
+                    "cancellation_confirmation_timeout_seconds"
+                ),
+            )
+        )
+
+        if (
+            cancellation_confirmation_timeout_seconds
+            < cancellation_confirmation_poll_seconds
+        ):
+            raise ValueError(
+                "Cancellation confirmation timeout must be at least "
+                "the poll interval."
+            )
+
         max_daily_loss = (
             _optional_positive_float(
                 execution_config.get(
@@ -418,6 +461,22 @@ def load_settings(
                 "paper_execution."
                 "risk_state_path"
             ),
+        )
+
+        order_state_path = _path_setting(
+            execution_config.get(
+                "order_state_path",
+                "logs/execution/order_state.json",
+            ),
+            "paper_execution.order_state_path",
+        )
+
+        lifecycle_log_path = _path_setting(
+            execution_config.get(
+                "lifecycle_log_path",
+                "logs/execution/order_lifecycle.jsonl",
+            ),
+            "paper_execution.lifecycle_log_path",
         )
 
         market_config = config.get(
@@ -619,6 +678,12 @@ def load_settings(
                 max_poll_attempts=(
                     max_poll_attempts
                 ),
+                cancellation_confirmation_poll_seconds=(
+                    cancellation_confirmation_poll_seconds
+                ),
+                cancellation_confirmation_timeout_seconds=(
+                    cancellation_confirmation_timeout_seconds
+                ),
                 max_daily_loss=(
                     max_daily_loss
                 ),
@@ -637,6 +702,8 @@ def load_settings(
                 risk_state_path=(
                     risk_state_path
                 ),
+                order_state_path=order_state_path,
+                lifecycle_log_path=lifecycle_log_path,
             )
         ),
         market_signal=MarketSignalSettings(

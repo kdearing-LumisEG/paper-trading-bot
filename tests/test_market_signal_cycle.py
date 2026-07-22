@@ -76,10 +76,14 @@ class FakeClockSource:
 
 
 class RecordingSignalHandler:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        outcome: SignalHandlingOutcome = SignalHandlingOutcome.NO_ACTION,
+    ) -> None:
         self.events: list[
             StrategySignalEvent
         ] = []
+        self.outcome = outcome
 
     def handle(
         self,
@@ -89,9 +93,7 @@ class RecordingSignalHandler:
 
         return SignalHandlingResult(
             event=event,
-            outcome=(
-                SignalHandlingOutcome.NO_ACTION
-            ),
+            outcome=self.outcome,
             reason="fake",
             position_quantity_before=0.0,
             risk_snapshot=(
@@ -191,13 +193,16 @@ def make_cycle(
     frame: pd.DataFrame,
     market_clock: MarketClockSnapshot | None = None,
     state_store=None,
+    handler_outcome: SignalHandlingOutcome = (
+        SignalHandlingOutcome.NO_ACTION
+    ),
 ) -> tuple[
     MarketSignalCycle,
     FakeBarSource,
     RecordingSignalHandler,
 ]:
     source = FakeBarSource(frame)
-    handler = RecordingSignalHandler()
+    handler = RecordingSignalHandler(handler_outcome)
 
     cycle = MarketSignalCycle(
         bar_source=source,
@@ -372,6 +377,29 @@ def test_force_reprocesses_latest_bar(
     assert len(handler.events) == 1
 
 
+def test_pre_intent_safety_block_does_not_mark_bar_processed(
+    tmp_path: Path,
+) -> None:
+    store = JsonSignalStateStore(tmp_path / "state.json")
+    first_cycle, _, first_handler = make_cycle(
+        frame=crossover_frame(),
+        state_store=store,
+        handler_outcome=SignalHandlingOutcome.BLOCKED,
+    )
+    second_cycle, _, second_handler = make_cycle(
+        frame=crossover_frame(),
+        state_store=store,
+        handler_outcome=SignalHandlingOutcome.BLOCKED,
+    )
+
+    first_cycle.run()
+    second = second_cycle.run()
+
+    assert len(first_handler.events) == 1
+    assert second.outcome is MarketSignalCycleOutcome.HANDLED
+    assert len(second_handler.events) == 1
+
+
 def test_near_close_forces_exit_signal() -> None:
     frame = bars(
         [
@@ -412,3 +440,43 @@ def test_near_close_forces_exit_signal() -> None:
     assert result.generated_signal is (
         StrategySignal.ENTER_LONG
     )
+
+
+def test_processed_signal_bar_does_not_suppress_session_flatten(
+    tmp_path: Path,
+) -> None:
+    store = JsonSignalStateStore(tmp_path / "state.json")
+    bar_end = datetime(2026, 1, 2, 20, 45, tzinfo=timezone.utc)
+    store.mark_processed(
+        strategy_name="ema_2_3",
+        symbol="SPY",
+        timeframe_minutes=15,
+        bar_end=bar_end,
+        signal="enter_long",
+        handled_at=bar_end,
+    )
+    near_close = clock(
+        timestamp="2026-01-02T20:46:00Z",
+        next_close="2026-01-02T21:00:00Z",
+    )
+    frame = bars(
+        [
+            "2026-01-02T19:45:00Z",
+            "2026-01-02T20:00:00Z",
+            "2026-01-02T20:15:00Z",
+            "2026-01-02T20:30:00Z",
+        ],
+        [10.0, 9.0, 8.0, 12.0],
+    )
+
+    cycle, _, handler = make_cycle(
+        frame=frame,
+        market_clock=near_close,
+        state_store=store,
+    )
+    result = cycle.run()
+
+    assert result.reason == SESSION_FLATTEN_REASON
+    assert len(handler.events) == 1
+    assert handler.events[0].action_name == "session_flatten"
+    assert handler.events[0].action_identity_time == near_close.next_close

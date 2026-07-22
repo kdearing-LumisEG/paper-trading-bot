@@ -1,6 +1,7 @@
 """Tests for safe, idempotent paper execution."""
 
 from collections import deque
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,8 @@ from trading_bot.broker.models import (
     BrokerOrderStatus,
     MarketOrderRequest,
     OrderSide,
+    PaperEnvironmentStatus,
+    PaperEnvironmentVerification,
     PositionSnapshot,
 )
 from trading_bot.execution.kill_switch import (
@@ -22,6 +25,12 @@ from trading_bot.execution.logging import (
 from trading_bot.execution.models import (
     ExecutionOutcome,
     ExecutionSettings,
+)
+from trading_bot.execution.order_state import (
+    JsonOrderStateStore,
+)
+from trading_bot.execution.position_state import (
+    JsonPositionStateStore,
 )
 from trading_bot.execution.service import (
     PaperExecutionService,
@@ -38,31 +47,57 @@ class FakeBroker:
         self.submit_count = 0
         self.lookup_count = 0
         self.cancelled_order_ids: list[str] = []
+        self.last_request: MarketOrderRequest | None = None
+        self.cancel_requested = False
+
+    def verify_paper_environment(
+        self,
+    ) -> PaperEnvironmentVerification:
+        return PaperEnvironmentVerification(
+            status=PaperEnvironmentStatus.VERIFIED_PAPER,
+            message="verified fake paper broker",
+        )
 
     def submit_market_order(
         self,
         request: MarketOrderRequest,
     ) -> BrokerOrder:
-        del request
+        self.last_request = request
         self.submit_count += 1
-        return self.submitted_order
+        return replace(
+            self.submitted_order,
+            client_order_id=request.client_order_id,
+            quantity=float(request.quantity),
+            side=request.side,
+        )
 
     def get_order(self, order_id: str) -> BrokerOrder:
         assert order_id == "order-1"
         if self.poll_orders:
-            return self.poll_orders.popleft()
-        return self.submitted_order
+            order = self.poll_orders.popleft()
+        elif self.cancel_requested:
+            order = make_order(BrokerOrderStatus.CANCELED)
+        else:
+            order = self.submitted_order
+        if self.last_request is None:
+            return order
+        return replace(
+            order,
+            client_order_id=self.last_request.client_order_id,
+            quantity=float(self.last_request.quantity),
+            side=self.last_request.side,
+        )
 
     def find_order_by_client_id(
         self,
         client_order_id: str,
     ) -> BrokerOrder | None:
-        assert client_order_id == "signal-1"
         self.lookup_count += 1
         return self.existing_order
 
     def cancel_order(self, order_id: str) -> None:
         self.cancelled_order_ids.append(order_id)
+        self.cancel_requested = True
 
     def get_account(self) -> AccountSnapshot:
         return AccountSnapshot(
@@ -99,11 +134,18 @@ def make_order(
         filled_quantity=(
             1.0
             if status is BrokerOrderStatus.FILLED
-            else 0.0
+            else (
+                0.5
+                if status
+                is BrokerOrderStatus.PARTIALLY_FILLED
+                else 0.0
+            )
         ),
         filled_average_price=(
             500.25
             if status is BrokerOrderStatus.FILLED
+            or status
+            is BrokerOrderStatus.PARTIALLY_FILLED
             else None
         ),
     )
@@ -125,6 +167,7 @@ def make_service(
     max_poll_attempts: int = 3,
     kill_switch: StaticKillSwitch | None = None,
     logger: JsonlExecutionLogger | None = None,
+    tmp_path: Path | None = None,
 ) -> PaperExecutionService:
     return PaperExecutionService(
         broker=broker,
@@ -132,10 +175,26 @@ def make_service(
             dry_run=dry_run,
             poll_interval_seconds=0.0,
             max_poll_attempts=max_poll_attempts,
+            cancellation_confirmation_poll_seconds=0.01,
+            cancellation_confirmation_timeout_seconds=0.01,
         ),
         kill_switch=kill_switch,
         logger=logger,
         sleeper=lambda _: None,
+        order_state_store=(
+            JsonOrderStateStore(
+                tmp_path / "orders.json"
+            )
+            if tmp_path is not None
+            else None
+        ),
+        position_state_store=(
+            JsonPositionStateStore(
+                tmp_path / "positions.json"
+            )
+            if tmp_path is not None
+            else None
+        ),
     )
 
 
@@ -183,7 +242,7 @@ def test_dry_run_checks_duplicate_but_does_not_submit() -> None:
     assert broker.submit_count == 0
 
 
-def test_order_is_polled_until_filled() -> None:
+def test_order_is_polled_until_filled(tmp_path: Path) -> None:
     broker = FakeBroker()
     broker.poll_orders.extend(
         [
@@ -195,7 +254,8 @@ def test_order_is_polled_until_filled() -> None:
     )
 
     result = make_service(
-        broker
+        broker,
+        tmp_path=tmp_path,
     ).execute_market_order(make_request())
 
     assert result.outcome is ExecutionOutcome.FILLED
@@ -206,14 +266,17 @@ def test_order_is_polled_until_filled() -> None:
     )
 
 
-def test_rejected_order_returns_terminal_result() -> None:
+def test_rejected_order_returns_terminal_result(
+    tmp_path: Path,
+) -> None:
     broker = FakeBroker()
     broker.submitted_order = make_order(
         BrokerOrderStatus.REJECTED
     )
 
     result = make_service(
-        broker
+        broker,
+        tmp_path=tmp_path,
     ).execute_market_order(make_request())
 
     assert result.outcome is ExecutionOutcome.TERMINAL
@@ -221,16 +284,18 @@ def test_rejected_order_returns_terminal_result() -> None:
     assert "rejected" in result.message
 
 
-def test_timeout_requests_cancellation() -> None:
+def test_timeout_requests_cancellation(tmp_path: Path) -> None:
     broker = FakeBroker()
 
     result = make_service(
         broker,
         max_poll_attempts=2,
+        tmp_path=tmp_path,
     ).execute_market_order(make_request())
 
-    assert result.outcome is ExecutionOutcome.TIMEOUT
-    assert result.poll_count == 2
+    assert result.outcome is ExecutionOutcome.TERMINAL
+    assert result.lifecycle_state == "canceled"
+    assert result.poll_count == 3
     assert result.cancellation_requested is True
     assert broker.cancelled_order_ids == ["order-1"]
 

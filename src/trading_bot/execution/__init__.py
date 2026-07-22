@@ -16,6 +16,7 @@ from trading_bot.execution.kill_switch import (
 )
 from trading_bot.execution.logging import (
     JsonlExecutionLogger,
+    JsonlOrderLifecycleLogger,
 )
 from trading_bot.execution.models import (
     ExecutionOutcome,
@@ -25,7 +26,14 @@ from trading_bot.execution.models import (
 from trading_bot.execution.position_state import (
     JsonPositionStateStore,
     NullPositionStateStore,
+    PositionPhase,
     TrackedPosition,
+)
+from trading_bot.execution.order_state import (
+    JsonOrderStateStore,
+    OrderIntent,
+    OrderLifecycleState,
+    OrderStateError,
 )
 from trading_bot.execution.risk_state import (
     JsonRiskStateStore,
@@ -47,13 +55,19 @@ __all__ = [
     "ExecutionSettings",
     "FileKillSwitch",
     "JsonPositionStateStore",
+    "JsonOrderStateStore",
     "JsonRiskStateStore",
     "JsonlExecutionLogger",
+    "JsonlOrderLifecycleLogger",
     "JsonlSignalDecisionLogger",
     "NullPositionStateStore",
     "NullRiskStateStore",
     "NullSignalDecisionLogger",
+    "OrderIntent",
+    "OrderLifecycleState",
+    "OrderStateError",
     "PaperExecutionService",
+    "PositionPhase",
     "SignalExecutionCoordinator",
     "SignalHandlingOutcome",
     "SignalHandlingResult",

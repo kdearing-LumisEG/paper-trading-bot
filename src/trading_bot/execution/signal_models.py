@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+import math
 import re
 
 from trading_bot.backtest.risk_manager import (
@@ -52,6 +53,10 @@ class StrategySignalEvent:
     signal: StrategySignal
     signal_time: datetime
     entry_quantity: int = 1
+    timeframe_minutes: int = 1
+    reference_price: float | None = None
+    action: str | None = None
+    identity_time: datetime | None = None
 
     def __post_init__(self) -> None:
         strategy_name = (
@@ -99,6 +104,36 @@ class StrategySignalEvent:
                 "entry_quantity must be a positive integer."
             )
 
+        if (
+            isinstance(self.timeframe_minutes, bool)
+            or not isinstance(self.timeframe_minutes, int)
+            or self.timeframe_minutes <= 0
+        ):
+            raise SignalModelError(
+                "timeframe_minutes must be a positive integer."
+            )
+
+        if (
+            self.reference_price is not None
+            and (
+                not math.isfinite(self.reference_price)
+                or self.reference_price <= 0
+            )
+        ):
+            raise SignalModelError(
+                "reference_price must be positive when present."
+            )
+
+        if self.action is not None:
+            action = self.action.strip()
+            if not action or not _STRATEGY_NAME_PATTERN.fullmatch(
+                action
+            ):
+                raise SignalModelError(
+                    "action contains unsupported characters."
+                )
+            object.__setattr__(self, "action", action)
+
         signal_time = self.signal_time
 
         if signal_time.tzinfo is None:
@@ -125,6 +160,34 @@ class StrategySignalEvent:
             "signal_time",
             signal_time,
         )
+
+        identity_time = self.identity_time
+        if identity_time is not None:
+            if identity_time.tzinfo is None:
+                identity_time = identity_time.replace(
+                    tzinfo=timezone.utc
+                )
+            else:
+                identity_time = identity_time.astimezone(
+                    timezone.utc
+                )
+            object.__setattr__(
+                self,
+                "identity_time",
+                identity_time,
+            )
+
+    @property
+    def action_name(self) -> str:
+        """Return the durable action identity component."""
+
+        return self.action or self.signal.value
+
+    @property
+    def action_identity_time(self) -> datetime:
+        """Return the stable timestamp used for durable identity."""
+
+        return self.identity_time or self.signal_time
 
 
 @dataclass(frozen=True)

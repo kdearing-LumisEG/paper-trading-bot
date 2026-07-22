@@ -10,11 +10,17 @@ from trading_bot.broker.models import (
     MarketClockSnapshot,
     MarketOrderRequest,
     PositionSnapshot,
+    PaperEnvironmentVerification,
 )
 
 
 class PaperBroker(Protocol):
     """Minimal broker contract required for safe paper execution."""
+
+    def verify_paper_environment(
+        self,
+    ) -> PaperEnvironmentVerification:
+        """Return positive or negative paper-environment evidence."""
 
     def submit_market_order(
         self,

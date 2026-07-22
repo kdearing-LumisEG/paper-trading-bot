@@ -8,13 +8,14 @@ from trading_bot.backtest.risk_manager import (
     RiskManager,
 )
 from trading_bot.broker.models import (
-    BrokerOrderStatus,
     MarketOrderRequest,
     OrderSide,
     PositionSnapshot,
 )
 from trading_bot.execution.client_ids import (
-    build_signal_client_order_id,
+    build_order_client_order_id,
+    build_order_intent_identity,
+    build_position_generation_id,
 )
 from trading_bot.execution.decision_logging import (
     NullSignalDecisionLogger,
@@ -26,7 +27,6 @@ from trading_bot.execution.models import (
 from trading_bot.execution.position_state import (
     NullPositionStateStore,
     PositionStateStore,
-    TrackedPosition,
 )
 from trading_bot.execution.risk_state import (
     NullRiskStateStore,
@@ -52,6 +52,9 @@ ACCOUNT_BLOCKED_REASON = "account_blocked"
 TRADING_BLOCKED_REASON = "trading_blocked"
 KILL_SWITCH_REASON = "kill_switch"
 EXECUTION_ATTEMPTED_REASON = "execution_attempted"
+BUYING_POWER_REASON = "insufficient_buying_power"
+REFERENCE_PRICE_REASON = "reference_price_unavailable"
+POSITION_OWNERSHIP_REASON = "position_ownership_uncertain"
 
 
 class SignalExecutionCoordinator:
@@ -192,26 +195,16 @@ class SignalExecutionCoordinator:
     ) -> float | None:
         order = execution_result.order
 
+        newly_filled_quantity = (
+            execution_result.newly_filled_quantity
+        )
+
         if (
-            execution_result.outcome
-            is not ExecutionOutcome.FILLED
-            or order is None
-            or order.status
-            is not BrokerOrderStatus.FILLED
+            order is None
+            or newly_filled_quantity <= 0
+            or order.filled_average_price is None
         ):
             return None
-
-        filled_quantity = (
-            order.filled_quantity
-            if order.filled_quantity > 0
-            else float(request.quantity)
-        )
-
-        state_time = (
-            order.submitted_at
-            if order.submitted_at is not None
-            else event.signal_time
-        )
 
         if request.side is OrderSide.BUY:
             self._risk_manager.record_entry(
@@ -220,29 +213,6 @@ class SignalExecutionCoordinator:
             self._risk_state_store.save(
                 self._risk_manager
             )
-
-            if (
-                order.filled_average_price
-                is not None
-                and filled_quantity > 0
-            ):
-                self._position_state_store.save(
-                    TrackedPosition(
-                        symbol=event.symbol,
-                        quantity=filled_quantity,
-                        average_entry_price=(
-                            order
-                            .filled_average_price
-                        ),
-                        updated_at=state_time,
-                        source_order_id=(
-                            order.order_id
-                        ),
-                        source_client_order_id=(
-                            order.client_order_id
-                        ),
-                    )
-                )
 
             return None
 
@@ -255,7 +225,7 @@ class SignalExecutionCoordinator:
         realized_net_pnl = (
             order.filled_average_price
             - position.average_entry_price
-        ) * filled_quantity
+        ) * newly_filled_quantity
 
         self._risk_manager.record_realized_pnl(
             session=event.signal_time,
@@ -264,19 +234,6 @@ class SignalExecutionCoordinator:
 
         self._risk_state_store.save(
             self._risk_manager
-        )
-
-        self._position_state_store.save(
-            TrackedPosition.flat(
-                symbol=event.symbol,
-                updated_at=state_time,
-                source_order_id=(
-                    order.order_id
-                ),
-                source_client_order_id=(
-                    order.client_order_id
-                ),
-            )
         )
 
         return realized_net_pnl
@@ -360,6 +317,28 @@ class SignalExecutionCoordinator:
             )
 
         if event.signal is StrategySignal.ENTER_LONG:
+            if event.reference_price is None:
+                return self._blocked(
+                    event=event,
+                    reason=REFERENCE_PRICE_REASON,
+                    position_quantity=position_quantity,
+                )
+
+            requested_notional = (
+                event.reference_price
+                * event.entry_quantity
+            )
+            if (
+                not math.isfinite(account.buying_power)
+                or account.buying_power
+                < requested_notional
+            ):
+                return self._blocked(
+                    event=event,
+                    reason=BUYING_POWER_REASON,
+                    position_quantity=position_quantity,
+                )
+
             risk_decision = (
                 self._risk_manager
                 .evaluate_entry(
@@ -389,6 +368,18 @@ class SignalExecutionCoordinator:
 
             side = OrderSide.BUY
             quantity = event.entry_quantity
+            position_generation_id = (
+                build_position_generation_id(
+                    strategy_name=event.strategy_name,
+                    symbol=event.symbol,
+                    timeframe_minutes=(
+                        event.timeframe_minutes
+                    ),
+                    signal_bar_end=(
+                        event.action_identity_time
+                    ),
+                )
+            )
 
         else:
             side = OrderSide.SELL
@@ -412,22 +403,69 @@ class SignalExecutionCoordinator:
                     ),
                 )
 
+            tracked_position = (
+                self._position_state_store.load(
+                    event.symbol
+                )
+            )
+            position_generation_id = (
+                tracked_position.position_generation_id
+                if tracked_position is not None
+                else None
+            )
+            if (
+                tracked_position is None
+                or tracked_position.legacy_open
+                or not position_generation_id
+            ):
+                return self._blocked(
+                    event=event,
+                    reason=POSITION_OWNERSHIP_REASON,
+                    position_quantity=position_quantity,
+                )
+
+        intent_id = build_order_intent_identity(
+            strategy_name=event.strategy_name,
+            symbol=event.symbol,
+            timeframe_minutes=event.timeframe_minutes,
+            signal_bar_end=event.action_identity_time,
+            action=event.action_name,
+            position_generation_id=(
+                position_generation_id
+            ),
+        )
+        client_order_id = build_order_client_order_id(
+            intent_id=intent_id,
+            strategy_name=event.strategy_name,
+            symbol=event.symbol,
+            side=side,
+            action=event.action_name,
+        )
+
         request = MarketOrderRequest(
             symbol=event.symbol,
             quantity=quantity,
             side=side,
             client_order_id=(
-                build_signal_client_order_id(
-                    event=event,
-                    side=side,
-                )
+                client_order_id
             ),
         )
 
         execution_result = (
             self._execution_service
             .execute_market_order(
-                request
+                request,
+                strategy_name=event.strategy_name,
+                timeframe_minutes=(
+                    event.timeframe_minutes
+                ),
+                signal_bar_end=(
+                    event.action_identity_time
+                ),
+                action=event.action_name,
+                position_generation_id=(
+                    position_generation_id
+                ),
             )
         )
 
