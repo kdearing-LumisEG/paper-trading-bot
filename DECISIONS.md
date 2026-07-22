@@ -27,3 +27,12 @@ Performance metrics are gross of fees and slippage.
 ## D007: Baseline is reference only
 
 The buy-and-hold baseline is a reference calculation that may hold overnight and is not an apples-to-apples comparison with the intraday strategy.
+
+## D008: Autonomous sessions remain bounded and paper-only
+
+A manually launched session may wait only for the same New York market date,
+uses bounded read recovery, and exits after the regular session. Emergency
+flattening is allowed only for a reconciled, generation-aware owned position
+with no unknown or unresolved order state. Runtime submits after a completed
+bar and flattens before close; backtests use next-open fills, modeled costs,
+and their own final-session close policy.

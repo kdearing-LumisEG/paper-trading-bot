@@ -58,6 +58,19 @@ class MarketSignalSettings:
     signal_state_path: Path = Path(
         "logs/execution/market_signal_state.json"
     )
+    session_poll_seconds: float = 30.0
+    preopen_wait_max_minutes: int = 180
+    recovery_poll_seconds: float = 15.0
+    recovery_timeout_seconds: float = 300.0
+    session_event_log_path: Path = Path(
+        "logs/execution/session_events.jsonl"
+    )
+    session_status_path: Path = Path(
+        "logs/execution/latest_session_status.json"
+    )
+    session_report_directory: Path = Path(
+        "logs/reports"
+    )
 
 
 @dataclass(frozen=True)
@@ -543,6 +556,64 @@ def load_settings(
             ),
         )
 
+        session_poll_seconds = _positive_float(
+            market_config.get(
+                "session_poll_seconds",
+                30.0,
+            ),
+            "market_signal.session_poll_seconds",
+        )
+        if not 5 <= session_poll_seconds <= 300:
+            raise ValueError(
+                "session_poll_seconds must be between 5 and 300"
+            )
+        preopen_wait_max_minutes = _positive_int(
+            market_config.get(
+                "preopen_wait_max_minutes",
+                180,
+            ),
+            "market_signal.preopen_wait_max_minutes",
+        )
+        recovery_poll_seconds = _positive_float(
+            market_config.get(
+                "recovery_poll_seconds",
+                15.0,
+            ),
+            "market_signal.recovery_poll_seconds",
+        )
+        recovery_timeout_seconds = _positive_float(
+            market_config.get(
+                "recovery_timeout_seconds",
+                300.0,
+            ),
+            "market_signal.recovery_timeout_seconds",
+        )
+        if recovery_timeout_seconds < recovery_poll_seconds:
+            raise ValueError(
+                "recovery timeout must be at least its poll interval"
+            )
+        session_event_log_path = _path_setting(
+            market_config.get(
+                "session_event_log_path",
+                "logs/execution/session_events.jsonl",
+            ),
+            "market_signal.session_event_log_path",
+        )
+        session_status_path = _path_setting(
+            market_config.get(
+                "session_status_path",
+                "logs/execution/latest_session_status.json",
+            ),
+            "market_signal.session_status_path",
+        )
+        session_report_directory = _path_setting(
+            market_config.get(
+                "session_report_directory",
+                "logs/reports",
+            ),
+            "market_signal.session_report_directory",
+        )
+
         reconciliation_config = config.get(
             "reconciliation",
             {},
@@ -718,6 +789,27 @@ def load_settings(
             ),
             signal_state_path=(
                 signal_state_path
+            ),
+            session_poll_seconds=(
+                session_poll_seconds
+            ),
+            preopen_wait_max_minutes=(
+                preopen_wait_max_minutes
+            ),
+            recovery_poll_seconds=(
+                recovery_poll_seconds
+            ),
+            recovery_timeout_seconds=(
+                recovery_timeout_seconds
+            ),
+            session_event_log_path=(
+                session_event_log_path
+            ),
+            session_status_path=(
+                session_status_path
+            ),
+            session_report_directory=(
+                session_report_directory
             ),
         ),
         reconciliation=ReconciliationSettings(

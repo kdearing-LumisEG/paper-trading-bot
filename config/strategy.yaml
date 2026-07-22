@@ -30,6 +30,13 @@ market_signal:
   bar_staleness_grace_seconds: 120.0
   flatten_minutes_before_close: 15
   signal_state_path: logs/execution/market_signal_state.json
+  session_poll_seconds: 30.0
+  preopen_wait_max_minutes: 180
+  recovery_poll_seconds: 15.0
+  recovery_timeout_seconds: 300.0
+  session_event_log_path: logs/execution/session_events.jsonl
+  session_status_path: logs/execution/latest_session_status.json
+  session_report_directory: logs/reports
 
 reconciliation:
   position_state_path: logs/execution/position_state.json

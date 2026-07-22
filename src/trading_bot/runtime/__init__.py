@@ -26,6 +26,15 @@ from trading_bot.runtime.signal_state import (
     NullSignalStateStore,
     SignalStateStore,
 )
+from trading_bot.runtime.cycle_operation import (
+    RuntimeCycleOperation,
+    RuntimeCycleResult,
+)
+from trading_bot.runtime.session import (
+    AutonomousSessionRunner,
+    AutonomousSessionSettings,
+    SessionState,
+)
 
 __all__ = [
     "AlpacaRecentBarSource",
@@ -44,4 +53,9 @@ __all__ = [
     "ReconciliationReport",
     "ReconciliationService",
     "SignalStateStore",
+    "RuntimeCycleOperation",
+    "RuntimeCycleResult",
+    "AutonomousSessionRunner",
+    "AutonomousSessionSettings",
+    "SessionState",
 ]

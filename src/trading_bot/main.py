@@ -8,6 +8,7 @@ from datetime import date, datetime
 from enum import Enum
 import json
 from pathlib import Path
+import signal
 
 from trading_bot.backtest.risk_controls import (
     ConsecutiveLossLimit,
@@ -64,6 +65,9 @@ from trading_bot.runtime.cycle import (
     MarketSignalCycle,
     MarketSignalCycleSettings,
 )
+from trading_bot.runtime.cycle_operation import (
+    RuntimeCycleOperation,
+)
 from trading_bot.runtime.market_data import (
     AlpacaRecentBarSource,
 )
@@ -78,6 +82,15 @@ from trading_bot.runtime.reconciliation import (
 )
 from trading_bot.runtime.signal_state import (
     JsonSignalStateStore,
+)
+from trading_bot.runtime.session import (
+    AutonomousSessionRunner,
+    AutonomousSessionSettings,
+)
+from trading_bot.runtime.session_reporting import (
+    SessionEventLogger,
+    SessionReportWriter,
+    SessionStatusWriter,
 )
 
 
@@ -123,6 +136,16 @@ def _print_json(
             sort_keys=True,
         )
     )
+
+
+def _raise_keyboard_interrupt(
+    signal_number,
+    frame,
+) -> None:
+    """Map a Windows console break to graceful session shutdown."""
+
+    del signal_number, frame
+    raise KeyboardInterrupt
 
 
 def _parse_datetime(
@@ -388,6 +411,18 @@ def build_parser() -> argparse.ArgumentParser:
         include_client_order_id=False,
     )
 
+    run_session_parser = subparsers.add_parser(
+        "run-session",
+        help=(
+            "Run one autonomous regular-market paper session, "
+            "including bounded recovery and daily reports."
+        ),
+    )
+    _add_execution_arguments(
+        run_session_parser,
+        include_client_order_id=False,
+    )
+
     return parser
 
 
@@ -547,6 +582,66 @@ def _reconciliation_service(
     )
 
 
+def _market_cycle(
+    *,
+    settings: Settings,
+    service: PaperExecutionService,
+    coordinator: SignalExecutionCoordinator,
+) -> MarketSignalCycle:
+    market = settings.market_signal
+    return MarketSignalCycle(
+        bar_source=AlpacaRecentBarSource(
+            api_key=settings.alpaca_api_key,
+            secret_key=settings.alpaca_secret_key,
+        ),
+        clock_source=service,
+        signal_handler=coordinator,
+        settings=MarketSignalCycleSettings(
+            strategy_name=settings.strategy.name,
+            symbol=settings.symbol,
+            timeframe_minutes=(
+                settings.timeframe_minutes
+            ),
+            fast_ema=settings.strategy.fast_ema,
+            slow_ema=settings.strategy.slow_ema,
+            entry_quantity=(
+                settings.paper_execution.quantity
+            ),
+            data_feed=settings.data_feed,
+            lookback_calendar_days=(
+                market.lookback_calendar_days
+            ),
+            bar_staleness_grace_seconds=(
+                market.bar_staleness_grace_seconds
+            ),
+            flatten_minutes_before_close=(
+                market.flatten_minutes_before_close
+            ),
+        ),
+        signal_state_store=JsonSignalStateStore(
+            market.signal_state_path
+        ),
+    )
+
+
+def _current_git_commit() -> str | None:
+    head = Path(".git/HEAD")
+    try:
+        value = head.read_text(
+            encoding="utf-8"
+        ).strip()
+        if value.startswith("ref: "):
+            return Path(
+                ".git",
+                value[5:],
+            ).read_text(
+                encoding="utf-8"
+            ).strip()
+        return value or None
+    except OSError:
+        return None
+
+
 def _reconciliation_blocked_payload(
     report: ReconciliationReport,
 ) -> dict[str, object]:
@@ -679,6 +774,90 @@ def main() -> None:
         position_store=position_store,
         order_store=order_store,
     )
+
+    if arguments.command == "run-session":
+        coordinator = _signal_coordinator(
+            settings=settings,
+            service=service,
+            risk_manager=risk_manager,
+            risk_store=risk_store,
+            position_store=position_store,
+        )
+        cycle = _market_cycle(
+            settings=settings,
+            service=service,
+            coordinator=coordinator,
+        )
+        market = settings.market_signal
+        runner = AutonomousSessionRunner(
+            settings=AutonomousSessionSettings(
+                poll_seconds=(
+                    market.session_poll_seconds
+                ),
+                preopen_wait_max_minutes=(
+                    market.preopen_wait_max_minutes
+                ),
+                recovery_poll_seconds=(
+                    market.recovery_poll_seconds
+                ),
+                recovery_timeout_seconds=(
+                    market.recovery_timeout_seconds
+                ),
+            ),
+            strategy_name=settings.strategy.name,
+            symbol=settings.symbol,
+            timeframe_minutes=(
+                settings.timeframe_minutes
+            ),
+            starting_commit=(
+                _current_git_commit()
+                or "unavailable"
+            ),
+            process_lock=runtime_lock,
+            reconciler=reconciler,
+            operation=RuntimeCycleOperation(
+                reconciler,
+                cycle,
+            ),
+            clock_source=service,
+            signal_handler=coordinator,
+            event_logger=SessionEventLogger(
+                market.session_event_log_path
+            ),
+            status_writer=SessionStatusWriter(
+                market.session_status_path
+            ),
+            report_writer=SessionReportWriter(
+                market.session_report_directory
+            ),
+        )
+        break_signal = getattr(
+            signal,
+            "SIGBREAK",
+            None,
+        )
+        previous_handler = None
+        if break_signal is not None:
+            previous_handler = signal.getsignal(
+                break_signal
+            )
+            signal.signal(
+                break_signal,
+                _raise_keyboard_interrupt,
+            )
+        try:
+            _print_json(
+                runner.run(
+                    execute=arguments.execute
+                )
+            )
+        finally:
+            if break_signal is not None:
+                signal.signal(
+                    break_signal,
+                    previous_handler,
+                )
+        return
 
     try:
         with runtime_lock:

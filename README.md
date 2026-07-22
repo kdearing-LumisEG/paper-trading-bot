@@ -56,6 +56,49 @@ Lifecycle audit events are appended to
 cancellation confirmation lives under `paper_execution` in
 `config/strategy.yaml`.
 
+## Autonomous paper session
+
+Start the bot manually during the regular session or up to the configured
+same-day pre-open window before it:
+
+```powershell
+# Safe validation; never submits an order
+.\.venv\Scripts\python.exe -m trading_bot.main run-session
+
+# Alpaca paper orders only; never live trading
+.\.venv\Scripts\python.exe -m trading_bot.main run-session --execute
+```
+
+The command acquires `logs/execution/runtime.lock` before startup
+reconciliation and holds it while waiting, polling, recovering, flattening,
+and writing the final report. Do not run another mutating command or manually
+change the Alpaca account while it is active. Read-only account inspection is
+permitted, but its output is only observational.
+
+The bot evaluates completed bars, suppresses duplicate bars, blocks new entry
+inside the configured pre-close flatten window, and uses the durable execution
+core for strategy, `session_flatten`, `emergency_flatten`, and
+`operator_shutdown_flatten` actions. A transient read error enters bounded
+recovery. Unknown orders, unresolved intents, generation/quantity mismatches,
+or persistence uncertainty fail closed and produce an urgent-review report;
+they never cause an ambiguous order retry.
+
+Use one `Ctrl+C` and wait for graceful cleanup. A safely owned open paper
+position is flattened only after all certainty checks pass. Power loss or a
+forced process kill is recovered later through the existing lock and
+reconciliation procedure; the lock is never cleared automatically.
+
+Current status is written atomically to
+`logs/execution/latest_session_status.json`. Historical JSON and Markdown
+reports, latest report copies, and clearly named urgent-review reports are in
+`logs/reports/`; session events append to
+`logs/execution/session_events.jsonl`. The process exits automatically after
+the session. If a report requires review, run `lock-status`, `positions`, and
+`reconcile` before considering another session.
+
+External alerts, stop-loss, and take-profit are not implemented. Live trading
+is not supported.
+
 ## Example usage
 
 ```python
